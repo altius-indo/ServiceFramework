@@ -2,6 +2,8 @@
 
 A comprehensive enterprise service framework built with Vert.x and Kotlin.
 
+Project connected to claude code
+
 ## Features
 
 - **Authentication**: Multi-provider support (JWT, OAuth2, SAML)
