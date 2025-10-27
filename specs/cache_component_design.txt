@@ -1,0 +1,1273 @@
+# Local In-Memory Cache Component Design
+
+## 1. Overview
+
+### 1.1 Purpose
+The Local In-Memory Cache component provides high-performance, thread-safe caching within application processes. It reduces latency, minimizes external service calls, and improves application throughput by storing frequently accessed data in memory.
+
+### 1.2 Design Principles
+- **Performance First**: Sub-microsecond access times
+- **Thread-Safe**: Lock-free reads, minimal write contention
+- **Memory Efficient**: Compact data structures, minimal overhead
+- **Observable**: Rich metrics and monitoring
+- **Flexible**: Multiple eviction policies and strategies
+
+## 2. Architecture
+
+### 2.1 High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Application Layer                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ @Cacheable   │  │ Direct       │  │ Cache        │          │
+│  │ Methods      │  │ Cache API    │  │ Loader       │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+└─────────┼──────────────────┼──────────────────┼─────────────────┘
+          │                  │                  │
+┌─────────┴──────────────────┴──────────────────┴─────────────────┐
+│                    Cache Manager                                 │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Cache        │  │ Invalidation │  │ Statistics   │          │
+│  │ Registry     │  │ Coordinator  │  │ Collector    │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+└───────────────────────────┬──────────────────────────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+┌───────▼────────┐  ┌───────▼────────┐  ┌──────▼──────────┐
+│   L1 Cache     │  │   L2 Cache     │  │  Loader Cache   │
+│  (Caffeine)    │  │  (Guava)       │  │  (Loading)      │
+└────────┬───────┘  └────────┬───────┘  └─────────────────┘
+         │                   │
+┌────────▼───────────────────▼────────────────────────────────────┐
+│                  Cache Storage Layer                             │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              Segmented Hash Map                           │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │  │
+│  │  │ Segment 0│  │ Segment 1│  │ Segment N│  ...         │  │
+│  │  │  (Lock)  │  │  (Lock)  │  │  (Lock)  │              │  │
+│  │  └──────────┘  └──────────┘  └──────────┘              │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              Eviction Queue (LRU/LFU)                     │  │
+│  │  ┌──────────┐    ┌──────────┐    ┌──────────┐          │  │
+│  │  │  Head    │───▶│  Entry   │───▶│   Tail   │          │  │
+│  │  └──────────┘    └──────────┘    └──────────┘          │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 Component Breakdown
+
+#### 2.2.1 Cache Interface
+**Core API**:
+```java
+public interface Cache<K, V> {
+    // Basic operations
+    V get(K key);
+    V get(K key, Callable<V> loader);
+    void put(K key, V value);
+    void put(K key, V value, Duration ttl);
+    void remove(K key);
+    void clear();
+    
+    // Bulk operations
+    Map<K, V> getAll(Iterable<K> keys);
+    void putAll(Map<K, V> entries);
+    void removeAll(Iterable<K> keys);
+    
+    // Conditional operations
+    V putIfAbsent(K key, V value);
+    boolean replace(K key, V oldValue, V newValue);
+    V computeIfAbsent(K key, Function<K, V> mappingFunction);
+    V computeIfPresent(K key, BiFunction<K, V, V> remappingFunction);
+    
+    // Query operations
+    boolean containsKey(K key);
+    long size();
+    Set<K> keys();
+    
+    // Statistics
+    CacheStats getStats();
+    
+    // Lifecycle
+    void invalidate(K key);
+    void invalidateAll();
+    void invalidateAll(Predicate<K> predicate);
+}
+
+public class CacheStats {
+    long hitCount;
+    long missCount;
+    long loadSuccessCount;
+    long loadFailureCount;
+    long totalLoadTime;
+    long evictionCount;
+    double hitRate;
+    double missRate;
+    double averageLoadTime;
+}
+```
+
+#### 2.2.2 Cache Implementation (Caffeine-based)
+**High-Performance Cache**:
+```java
+public class LocalCache<K, V> implements Cache<K, V> {
+    private final com.github.benmanes.caffeine.cache.Cache<K, CacheEntry<V>> cache;
+    private final CacheConfig config;
+    private final CacheStatsCollector statsCollector;
+    private final String cacheName;
+    
+    public LocalCache(String name, CacheConfig config) {
+        this.cacheName = name;
+        this.config = config;
+        this.statsCollector = new CacheStatsCollector(name);
+        this.cache = buildCache();
+    }
+    
+    private com.github.benmanes.caffeine.cache.Cache<K, CacheEntry<V>> buildCache() {
+        Caffeine<Object, Object> builder = Caffeine.newBuilder();
+        
+        // Size limits
+        if (config.getMaximumSize() > 0) {
+            builder.maximumSize(config.getMaximumSize());
+        }
+        if (config.getMaximumWeight() > 0) {
+            builder.maximumWeight(config.getMaximumWeight())
+                   .weigher(this::weighEntry);
+        }
+        
+        // Expiration
+        if (config.getExpireAfterWrite() != null) {
+            builder.expireAfterWrite(config.getExpireAfterWrite());
+        }
+        if (config.getExpireAfterAccess() != null) {
+            builder.expireAfterAccess(config.getExpireAfterAccess());
+        }
+        if (config.getRefreshAfterWrite() != null) {
+            builder.refreshAfterWrite(config.getRefreshAfterWrite());
+        }
+        
+        // Eviction listener
+        builder.evictionListener(this::onEviction);
+        
+        // Removal listener
+        builder.removalListener(this::onRemoval);
+        
+        // Statistics
+        if (config.isRecordStats()) {
+            builder.recordStats();
+        }
+        
+        return builder.build();
+    }
+    
+    @Override
+    public V get(K key) {
+        CacheEntry<V> entry = cache.getIfPresent(key);
+        
+        if (entry != null && !entry.isExpired()) {
+            statsCollector.recordHit();
+            entry.recordAccess();
+            return entry.getValue();
+        }
+        
+        statsCollector.recordMiss();
+        return null;
+    }
+    
+    @Override
+    public V get(K key, Callable<V> loader) {
+        CacheEntry<V> entry = cache.get(key, k -> {
+            try {
+                statsCollector.recordLoadStart();
+                V value = loader.call();
+                statsCollector.recordLoadSuccess();
+                return new CacheEntry<>(value, config.getDefaultTtl());
+            } catch (Exception e) {
+                statsCollector.recordLoadFailure();
+                throw new CacheLoadException("Failed to load value for key: " + key, e);
+            }
+        });
+        
+        if (entry.isExpired()) {
+            cache.invalidate(key);
+            statsCollector.recordMiss();
+            return get(key, loader); // Retry
+        }
+        
+        return entry.getValue();
+    }
+    
+    @Override
+    public void put(K key, V value) {
+        put(key, value, config.getDefaultTtl());
+    }
+    
+    @Override
+    public void put(K key, V value, Duration ttl) {
+        CacheEntry<V> entry = new CacheEntry<>(value, ttl);
+        cache.put(key, entry);
+        statsCollector.recordPut();
+    }
+    
+    @Override
+    public Map<K, V> getAll(Iterable<K> keys) {
+        Map<K, CacheEntry<V>> entries = cache.getAllPresent(keys);
+        Map<K, V> result = new HashMap<>();
+        
+        for (Map.Entry<K, CacheEntry<V>> entry : entries.entrySet()) {
+            if (!entry.getValue().isExpired()) {
+                result.put(entry.getKey(), entry.getValue().getValue());
+                statsCollector.recordHit();
+            } else {
+                cache.invalidate(entry.getKey());
+                statsCollector.recordMiss();
+            }
+        }
+        
+        return result;
+    }
+    
+    private int weighEntry(K key, CacheEntry<V> entry) {
+        // Estimate memory size
+        int keySize = estimateSize(key);
+        int valueSize = estimateSize(entry.getValue());
+        int overhead = 64; // Object overhead
+        return keySize + valueSize + overhead;
+    }
+    
+    private void onEviction(K key, CacheEntry<V> entry, RemovalCause cause) {
+        statsCollector.recordEviction(cause);
+        log.debug("Evicted key: {}, cause: {}", key, cause);
+    }
+    
+    private void onRemoval(K key, CacheEntry<V> entry, RemovalCause cause) {
+        if (config.getRemovalListener() != null) {
+            config.getRemovalListener().onRemoval(key, entry.getValue(), cause);
+        }
+    }
+}
+
+public class CacheEntry<V> {
+    private final V value;
+    private final long expirationTime;
+    private volatile long lastAccessTime;
+    private final AtomicLong accessCount;
+    
+    public CacheEntry(V value, Duration ttl) {
+        this.value = value;
+        this.expirationTime = ttl != null 
+            ? System.nanoTime() + ttl.toNanos() 
+            : Long.MAX_VALUE;
+        this.lastAccessTime = System.nanoTime();
+        this.accessCount = new AtomicLong(0);
+    }
+    
+    public V getValue() {
+        return value;
+    }
+    
+    public boolean isExpired() {
+        return System.nanoTime() > expirationTime;
+    }
+    
+    public void recordAccess() {
+        lastAccessTime = System.nanoTime();
+        accessCount.incrementAndGet();
+    }
+    
+    public long getAccessCount() {
+        return accessCount.get();
+    }
+}
+```
+
+#### 2.2.3 Cache Manager
+**Multi-Cache Coordination**:
+```java
+public class CacheManager {
+    private final ConcurrentMap<String, Cache<?, ?>> caches = new ConcurrentHashMap<>();
+    private final CacheConfig defaultConfig;
+    private final InvalidationCoordinator invalidationCoordinator;
+    
+    public <K, V> Cache<K, V> getCache(String name) {
+        return (Cache<K, V>) caches.computeIfAbsent(name, this::createCache);
+    }
+    
+    public <K, V> Cache<K, V> getCache(String name, CacheConfig config) {
+        return (Cache<K, V>) caches.computeIfAbsent(name, n -> createCache(n, config));
+    }
+    
+    private Cache<?, ?> createCache(String name) {
+        return createCache(name, defaultConfig);
+    }
+    
+    private Cache<?, ?> createCache(String name, CacheConfig config) {
+        Cache<?, ?> cache = new LocalCache<>(name, config);
+        
+        // Register for invalidation events
+        invalidationCoordinator.register(name, cache);
+        
+        // Register metrics
+        registerMetrics(name, cache);
+        
+        return cache;
+    }
+    
+    public void invalidateAll() {
+        caches.values().forEach(Cache::invalidateAll);
+    }
+    
+    public void invalidate(String cacheName, Object key) {
+        Cache<?, ?> cache = caches.get(cacheName);
+        if (cache != null) {
+            cache.remove(key);
+        }
+    }
+    
+    public Map<String, CacheStats> getAllStats() {
+        Map<String, CacheStats> stats = new HashMap<>();
+        caches.forEach((name, cache) -> stats.put(name, cache.getStats()));
+        return stats;
+    }
+    
+    private void registerMetrics(String name, Cache<?, ?> cache) {
+        // Register Prometheus metrics
+        Gauge.build()
+            .name("cache_size")
+            .help("Current cache size")
+            .labelNames("cache")
+            .register()
+            .setChild(new Gauge.Child() {
+                @Override
+                public double get() {
+                    return cache.size();
+                }
+            }, name);
+        
+        // More metrics...
+    }
+}
+```
+
+#### 2.2.4 Loading Cache
+**Automatic Data Loading**:
+```java
+public class LoadingCache<K, V> implements Cache<K, V> {
+    private final Cache<K, V> delegate;
+    private final CacheLoader<K, V> loader;
+    private final ExecutorService loaderExecutor;
+    
+    public LoadingCache(Cache<K, V> delegate, CacheLoader<K, V> loader) {
+        this.delegate = delegate;
+        this.loader = loader;
+        this.loaderExecutor = Executors.newFixedThreadPool(
+            Runtime.getRuntime().availableProcessors()
+        );
+    }
+    
+    @Override
+    public V get(K key) {
+        V value = delegate.get(key);
+        if (value != null) {
+            return value;
+        }
+        
+        // Load value
+        return load(key);
+    }
+    
+    private V load(K key) {
+        try {
+            V value = loader.load(key);
+            if (value != null) {
+                delegate.put(key, value);
+            }
+            return value;
+        } catch (Exception e) {
+            throw new CacheLoadException("Failed to load value", e);
+        }
+    }
+    
+    public void refresh(K key) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                V value = loader.load(key);
+                if (value != null) {
+                    delegate.put(key, value);
+                }
+            } catch (Exception e) {
+                log.error("Failed to refresh cache key: {}", key, e);
+            }
+        }, loaderExecutor);
+    }
+    
+    public void refreshAll() {
+        Set<K> keys = delegate.keys();
+        keys.forEach(this::refresh);
+    }
+}
+
+@FunctionalInterface
+public interface CacheLoader<K, V> {
+    V load(K key) throws Exception;
+    
+    default Map<K, V> loadAll(Iterable<K> keys) throws Exception {
+        Map<K, V> result = new HashMap<>();
+        for (K key : keys) {
+            result.put(key, load(key));
+        }
+        return result;
+    }
+}
+```
+
+#### 2.2.5 Multi-Level Cache
+**L1/L2 Cache Hierarchy**:
+```java
+public class MultiLevelCache<K, V> implements Cache<K, V> {
+    private final Cache<K, V> l1Cache;  // Local in-memory
+    private final Cache<K, V> l2Cache;  // Distributed (Redis)
+    
+    @Override
+    public V get(K key) {
+        // Try L1 first
+        V value = l1Cache.get(key);
+        if (value != null) {
+            return value;
+        }
+        
+        // Try L2
+        value = l2Cache.get(key);
+        if (value != null) {
+            // Promote to L1
+            l1Cache.put(key, value);
+            return value;
+        }
+        
+        return null;
+    }
+    
+    @Override
+    public void put(K key, V value) {
+        // Write to both levels
+        l1Cache.put(key, value);
+        l2Cache.put(key, value);
+    }
+    
+    @Override
+    public void remove(K key) {
+        l1Cache.remove(key);
+        l2Cache.remove(key);
+    }
+}
+```
+
+#### 2.2.6 Cache Invalidation Coordinator
+**Distributed Invalidation**:
+```java
+public class InvalidationCoordinator {
+    private final Map<String, Cache<?, ?>> caches = new ConcurrentHashMap<>();
+    private final MessageBus messageBus;
+    
+    public void register(String name, Cache<?, ?> cache) {
+        caches.put(name, cache);
+    }
+    
+    public void invalidate(String cacheName, Object key) {
+        // Invalidate locally
+        Cache<?, ?> cache = caches.get(cacheName);
+        if (cache != null) {
+            cache.remove(key);
+        }
+        
+        // Broadcast to other instances
+        InvalidationMessage message = InvalidationMessage.builder()
+            .cacheName(cacheName)
+            .key(key)
+            .timestamp(System.currentTimeMillis())
+            .instanceId(getInstanceId())
+            .build();
+        
+        messageBus.publish("cache.invalidation", message);
+    }
+    
+    @Subscribe
+    public void onInvalidationMessage(InvalidationMessage message) {
+        // Don't process our own messages
+        if (message.getInstanceId().equals(getInstanceId())) {
+            return;
+        }
+        
+        Cache<?, ?> cache = caches.get(message.getCacheName());
+        if (cache != null) {
+            cache.remove(message.getKey());
+        }
+    }
+}
+```
+
+## 3. Cache Patterns
+
+### 3.1 Cache-Aside Pattern
+```java
+public class UserService {
+    private final Cache<String, User> userCache;
+    private final UserRepository userRepository;
+    
+    public User getUser(String userId) {
+        // Try cache first
+        User user = userCache.get(userId);
+        if (user != null) {
+            return user;
+        }
+        
+        // Load from database
+        user = userRepository.findById(userId);
+        if (user != null) {
+            // Populate cache
+            userCache.put(userId, user, Duration.ofMinutes(15));
+        }
+        
+        return user;
+    }
+    
+    public void updateUser(User user) {
+        // Update database
+        userRepository.save(user);
+        
+        // Invalidate cache
+        userCache.remove(user.getId());
+    }
+}
+```
+
+### 3.2 Read-Through Pattern
+```java
+public class ConfigService {
+    private final LoadingCache<String, Config> configCache;
+    
+    public ConfigService(ConfigRepository repository) {
+        Cache<String, Config> baseCache = new LocalCache<>(
+            "config",
+            CacheConfig.builder()
+                .maximumSize(1000)
+                .expireAfterWrite(Duration.ofMinutes(5))
+                .build()
+        );
+        
+        this.configCache = new LoadingCache<>(
+            baseCache,
+            key -> repository.findByKey(key)
+        );
+    }
+    
+    public Config getConfig(String key) {
+        // Cache automatically loads on miss
+        return configCache.get(key);
+    }
+}
+```
+
+### 3.3 Write-Through Pattern
+```java
+public class SessionService {
+    private final Cache<String, Session> sessionCache;
+    private final SessionRepository sessionRepository;
+    
+    public void saveSession(Session session) {
+        // Write to cache
+        sessionCache.put(session.getId(), session);
+        
+        // Write to database (synchronously)
+        sessionRepository.save(session);
+    }
+}
+```
+
+## 4. Spring Integration
+
+### 4.1 Spring Cache Configuration
+```java
+@Configuration
+@EnableCaching
+public class CacheConfiguration {
+    
+    @Bean
+    public CacheManager cacheManager() {
+        return new SpringCacheManager(
+            CacheConfig.builder()
+                .maximumSize(10000)
+                .expireAfterWrite(Duration.ofMinutes(10))
+                .recordStats(true)
+                .build()
+        );
+    }
+}
+
+// Usage with annotations
+@Service
+public class ProductService {
+    
+    @Cacheable(value = "products", key = "#id")
+    public Product getProduct(String id) {
+        return productRepository.findById(id);
+    }
+    
+    @CachePut(value = "products", key = "#product.id")
+    public Product updateProduct(Product product) {
+        return productRepository.save(product);
+    }
+    
+    @CacheEvict(value = "products", key = "#id")
+    public void deleteProduct(String id) {
+        productRepository.deleteById(id);
+    }
+    
+    @CacheEvict(value = "products", allEntries = true)
+    public void deleteAllProducts() {
+        productRepository.deleteAll();
+    }
+}
+```
+
+## 5. Monitoring
+
+### 5.1 Metrics Collection
+```java
+public class CacheStatsCollector {
+    private final String cacheName;
+    private final AtomicLong hitCount = new AtomicLong(0);
+    private final AtomicLong missCount = new AtomicLong(0);
+    private final AtomicLong loadSuccessCount = new AtomicLong(0);
+    private final AtomicLong loadFailureCount = new AtomicLong(0);
+    private final AtomicLong totalLoadTime = new AtomicLong(0);
+    private final AtomicLong evictionCount = new AtomicLong(0);
+    private final AtomicLong putCount = new AtomicLong(0);
+    
+    public void recordHit() {
+        hitCount.incrementAndGet();
+    }
+    
+    public void recordMiss() {
+        missCount.incrementAndGet();
+    }
+    
+    public void recordLoadStart() {
+        // Track start time in thread local
+        LoadContext.startLoad();
+    }
+    
+    public void recordLoadSuccess() {
+        long duration = LoadContext.endLoad();
+        loadSuccessCount.incrementAndGet();
+        totalLoadTime.addAndGet(duration);
+    }
+    
+    public void recordLoadFailure() {
+        LoadContext.endLoad();
+        loadFailureCount.incrementAndGet();
+    }
+    
+    public void recordEviction(RemovalCause cause) {
+        evictionCount.incrementAndGet();
+    }
+    
+    public void recordPut() {
+        putCount.incrementAndGet();
+    }
+    
+    public CacheStats getStats() {
+        long hits = hitCount.get();
+        long misses = missCount.get();
+        long requests = hits + misses;
+        
+        return CacheStats.builder()
+            .hitCount(hits)
+            .missCount(misses)
+            .hitRate(requests > 0 ? (double) hits / requests : 0.0)
+            .missRate(requests > 0 ? (double) misses / requests : 0.0)
+            .loadSuccessCount(loadSuccessCount.get())
+            .loadFailureCount(loadFailureCount.get())
+            .averageLoadTime(calculateAverageLoadTime())
+            .evictionCount(evictionCount.get())
+            .putCount(putCount.get())
+            .build();
+    }
+    
+    private double calculateAverageLoadTime() {
+        long loads = loadSuccessCount.get();
+        if (loads == 0) return 0.0;
+        return (double) totalLoadTime.get() / loads / 1_000_000.0; // Convert to ms
+    }
+}
+
+// Thread-local context for tracking load time
+class LoadContext {
+    private static final ThreadLocal<Long> startTime = new ThreadLocal<>();
+    
+    static void startLoad() {
+        startTime.set(System.nanoTime());
+    }
+    
+    static long endLoad() {
+        Long start = startTime.get();
+        if (start == null) return 0;
+        long duration = System.nanoTime() - start;
+        startTime.remove();
+        return duration;
+    }
+}
+```
+
+### 5.2 Prometheus Metrics
+```java
+@Component
+public class CacheMetricsExporter {
+    private final CacheManager cacheManager;
+    
+    @PostConstruct
+    public void registerMetrics() {
+        // Cache size
+        Gauge.build()
+            .name("cache_size_entries")
+            .help("Current number of entries in cache")
+            .labelNames("cache")
+            .register();
+        
+        // Hit rate
+        Gauge.build()
+            .name("cache_hit_rate")
+            .help("Cache hit rate")
+            .labelNames("cache")
+            .register();
+        
+        // Miss rate
+        Gauge.build()
+            .name("cache_miss_rate")
+            .help("Cache miss rate")
+            .labelNames("cache")
+            .register();
+        
+        // Eviction count
+        Counter.build()
+            .name("cache_evictions_total")
+            .help("Total number of cache evictions")
+            .labelNames("cache", "cause")
+            .register();
+        
+        // Load time
+        Summary.build()
+            .name("cache_load_duration_seconds")
+            .help("Cache load duration")
+            .labelNames("cache", "result")
+            .register();
+        
+        // Memory usage
+        Gauge.build()
+            .name("cache_memory_bytes")
+            .help("Estimated cache memory usage")
+            .labelNames("cache")
+            .register();
+    }
+    
+    @Scheduled(fixedRate = 10000) // Every 10 seconds
+    public void updateMetrics() {
+        Map<String, CacheStats> allStats = cacheManager.getAllStats();
+        
+        for (Map.Entry<String, CacheStats> entry : allStats.entrySet()) {
+            String cacheName = entry.getKey();
+            CacheStats stats = entry.getValue();
+            
+            updateGauge("cache_hit_rate", stats.getHitRate(), cacheName);
+            updateGauge("cache_miss_rate", stats.getMissRate(), cacheName);
+        }
+    }
+}
+```
+
+### 5.3 Health Checks
+```java
+@Component
+public class CacheHealthIndicator implements HealthIndicator {
+    private final CacheManager cacheManager;
+    
+    @Override
+    public Health health() {
+        try {
+            Map<String, CacheStats> allStats = cacheManager.getAllStats();
+            
+            // Check if any cache has critical issues
+            for (Map.Entry<String, CacheStats> entry : allStats.entrySet()) {
+                CacheStats stats = entry.getValue();
+                
+                // Check for very low hit rate
+                if (stats.getHitRate() < 0.1 && stats.getHitCount() + stats.getMissCount() > 1000) {
+                    return Health.down()
+                        .withDetail("cache", entry.getKey())
+                        .withDetail("issue", "Low hit rate")
+                        .withDetail("hitRate", stats.getHitRate())
+                        .build();
+                }
+                
+                // Check for high load failure rate
+                double failureRate = stats.getLoadFailureCount() / 
+                    (double)(stats.getLoadSuccessCount() + stats.getLoadFailureCount());
+                if (failureRate > 0.5) {
+                    return Health.down()
+                        .withDetail("cache", entry.getKey())
+                        .withDetail("issue", "High load failure rate")
+                        .withDetail("failureRate", failureRate)
+                        .build();
+                }
+            }
+            
+            return Health.up()
+                .withDetail("caches", allStats.size())
+                .build();
+                
+        } catch (Exception e) {
+            return Health.down()
+                .withException(e)
+                .build();
+        }
+    }
+}
+```
+
+## 6. Configuration
+
+### 6.1 Cache Configuration Class
+```java
+@Data
+@Builder
+public class CacheConfig {
+    // Size limits
+    private long maximumSize;
+    private long maximumWeight;
+    
+    // Expiration
+    private Duration expireAfterWrite;
+    private Duration expireAfterAccess;
+    private Duration refreshAfterWrite;
+    private Duration defaultTtl;
+    
+    // Eviction policy
+    private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
+    
+    // Statistics
+    private boolean recordStats = true;
+    
+    // Listeners
+    private RemovalListener<?, ?> removalListener;
+    
+    // Concurrency
+    private int concurrencyLevel = Runtime.getRuntime().availableProcessors();
+    
+    // Initial capacity
+    private int initialCapacity = 16;
+    
+    // Weak references
+    private boolean weakKeys = false;
+    private boolean weakValues = false;
+    private boolean softValues = false;
+    
+    public static CacheConfig defaultConfig() {
+        return CacheConfig.builder()
+            .maximumSize(10000)
+            .expireAfterWrite(Duration.ofMinutes(10))
+            .defaultTtl(Duration.ofMinutes(10))
+            .recordStats(true)
+            .build();
+    }
+}
+
+public enum EvictionPolicy {
+    LRU,    // Least Recently Used
+    LFU,    // Least Frequently Used
+    FIFO,   // First In First Out
+    RANDOM  // Random
+}
+```
+
+### 6.2 YAML Configuration
+```yaml
+cache:
+  default:
+    maximum-size: 10000
+    expire-after-write: 10m
+    expire-after-access: 5m
+    record-stats: true
+    
+  caches:
+    users:
+      maximum-size: 5000
+      expire-after-write: 15m
+      eviction-policy: LRU
+      
+    products:
+      maximum-size: 20000
+      expire-after-write: 30m
+      refresh-after-write: 5m
+      eviction-policy: LFU
+      
+    sessions:
+      maximum-size: 100000
+      expire-after-access: 30m
+      weak-values: true
+      
+    config:
+      maximum-size: 1000
+      expire-after-write: 1h
+      
+  monitoring:
+    enabled: true
+    export-interval: 10s
+    
+  invalidation:
+    broadcast-enabled: true
+    channel: cache-invalidation
+```
+
+## 7. Advanced Features
+
+### 7.1 Conditional Caching
+```java
+public class ConditionalCache<K, V> implements Cache<K, V> {
+    private final Cache<K, V> delegate;
+    private final Predicate<V> cachePredicate;
+    
+    @Override
+    public void put(K key, V value) {
+        // Only cache if predicate passes
+        if (cachePredicate.test(value)) {
+            delegate.put(key, value);
+        }
+    }
+}
+
+// Usage
+Cache<String, User> userCache = new ConditionalCache<>(
+    baseCache,
+    user -> user.isActive() && !user.isDeleted()
+);
+```
+
+### 7.2 Computed Keys
+```java
+@FunctionalInterface
+public interface KeyGenerator<T> {
+    Object generate(T target, Method method, Object... params);
+}
+
+public class DefaultKeyGenerator implements KeyGenerator<Object> {
+    @Override
+    public Object generate(Object target, Method method, Object... params) {
+        if (params.length == 0) {
+            return SimpleKey.EMPTY;
+        }
+        if (params.length == 1) {
+            return params[0];
+        }
+        return new SimpleKey(params);
+    }
+}
+
+// Usage
+@Cacheable(value = "users", keyGenerator = "customKeyGenerator")
+public User findUser(String firstName, String lastName) {
+    return userRepository.find(firstName, lastName);
+}
+```
+
+### 7.3 Cache Warming
+```java
+@Component
+public class CacheWarmer {
+    private final CacheManager cacheManager;
+    private final UserRepository userRepository;
+    private final ProductRepository productRepository;
+    
+    @PostConstruct
+    public void warmCaches() {
+        CompletableFuture.runAsync(this::warmUserCache);
+        CompletableFuture.runAsync(this::warmProductCache);
+    }
+    
+    private void warmUserCache() {
+        Cache<String, User> userCache = cacheManager.getCache("users");
+        
+        // Load active users
+        List<User> activeUsers = userRepository.findActiveUsers();
+        for (User user : activeUsers) {
+            userCache.put(user.getId(), user);
+        }
+        
+        log.info("Warmed user cache with {} entries", activeUsers.size());
+    }
+    
+    private void warmProductCache() {
+        Cache<String, Product> productCache = cacheManager.getCache("products");
+        
+        // Load popular products
+        List<Product> popularProducts = productRepository.findPopularProducts(1000);
+        for (Product product : popularProducts) {
+            productCache.put(product.getId(), product);
+        }
+        
+        log.info("Warmed product cache with {} entries", popularProducts.size());
+    }
+}
+```
+
+### 7.4 Time-Based Refresh
+```java
+public class RefreshingCache<K, V> implements Cache<K, V> {
+    private final LoadingCache<K, V> cache;
+    private final ScheduledExecutorService refreshExecutor;
+    
+    public RefreshingCache(LoadingCache<K, V> cache, Duration refreshInterval) {
+        this.cache = cache;
+        this.refreshExecutor = Executors.newScheduledThreadPool(1);
+        
+        // Schedule periodic refresh
+        refreshExecutor.scheduleAtFixedRate(
+            this::refreshAll,
+            refreshInterval.toMillis(),
+            refreshInterval.toMillis(),
+            TimeUnit.MILLISECONDS
+        );
+    }
+    
+    private void refreshAll() {
+        Set<K> keys = cache.keys();
+        for (K key : keys) {
+            cache.refresh(key);
+        }
+    }
+}
+```
+
+## 8. Performance Optimization
+
+### 8.1 Lock-Free Reads
+```java
+public class LockFreeCacheEntry<V> {
+    private final AtomicReference<V> value;
+    private final AtomicLong expirationTime;
+    private final AtomicLong lastAccessTime;
+    
+    public V getValue() {
+        // No locks needed for reads
+        lastAccessTime.set(System.nanoTime());
+        return value.get();
+    }
+    
+    public boolean compareAndSet(V expected, V update) {
+        return value.compareAndSet(expected, update);
+    }
+}
+```
+
+### 8.2 Segmented Cache
+```java
+public class SegmentedCache<K, V> implements Cache<K, V> {
+    private final CacheSegment<K, V>[] segments;
+    private final int segmentMask;
+    
+    @SuppressWarnings("unchecked")
+    public SegmentedCache(int segmentCount) {
+        // Ensure power of 2
+        segmentCount = Integer.highestOneBit(segmentCount);
+        this.segmentMask = segmentCount - 1;
+        this.segments = new CacheSegment[segmentCount];
+        
+        for (int i = 0; i < segmentCount; i++) {
+            segments[i] = new CacheSegment<>();
+        }
+    }
+    
+    private CacheSegment<K, V> segmentFor(K key) {
+        int hash = key.hashCode();
+        return segments[hash & segmentMask];
+    }
+    
+    @Override
+    public V get(K key) {
+        return segmentFor(key).get(key);
+    }
+    
+    @Override
+    public void put(K key, V value) {
+        segmentFor(key).put(key, value);
+    }
+    
+    static class CacheSegment<K, V> {
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Map<K, V> map = new HashMap<>();
+        
+        V get(K key) {
+            // Lock-free read
+            return map.get(key);
+        }
+        
+        void put(K key, V value) {
+            lock.lock();
+            try {
+                map.put(key, value);
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+}
+```
+
+### 8.3 Bloom Filter for Negative Caching
+```java
+public class BloomFilterCache<K, V> implements Cache<K, V> {
+    private final Cache<K, V> delegate;
+    private final BloomFilter<K> bloomFilter;
+    
+    public BloomFilterCache(Cache<K, V> delegate, int expectedInsertions) {
+        this.delegate = delegate;
+        this.bloomFilter = BloomFilter.create(
+            Funnels.forObject(), 
+            expectedInsertions, 
+            0.01  // 1% false positive rate
+        );
+    }
+    
+    @Override
+    public V get(K key) {
+        // Quick negative check
+        if (!bloomFilter.mightContain(key)) {
+            return null;  // Definitely not in cache
+        }
+        
+        // Might be in cache, check delegate
+        return delegate.get(key);
+    }
+    
+    @Override
+    public void put(K key, V value) {
+        bloomFilter.put(key);
+        delegate.put(key, value);
+    }
+}
+```
+
+## 9. Testing
+
+### 9.1 Test Utilities
+```java
+public class CacheTestUtils {
+    
+    public static <K, V> Cache<K, V> createTestCache() {
+        return new LocalCache<>(
+            "test",
+            CacheConfig.builder()
+                .maximumSize(100)
+                .expireAfterWrite(Duration.ofMinutes(1))
+                .recordStats(true)
+                .build()
+        );
+    }
+    
+    public static void assertCacheHit(Cache<?, ?> cache, long expectedHits) {
+        CacheStats stats = cache.getStats();
+        assertEquals(expectedHits, stats.getHitCount());
+    }
+    
+    public static void assertCacheMiss(Cache<?, ?> cache, long expectedMisses) {
+        CacheStats stats = cache.getStats();
+        assertEquals(expectedMisses, stats.getMissCount());
+    }
+}
+
+// Test example
+@Test
+public void testCacheHitAndMiss() {
+    Cache<String, String> cache = CacheTestUtils.createTestCache();
+    
+    // Miss
+    assertNull(cache.get("key1"));
+    CacheTestUtils.assertCacheMiss(cache, 1);
+    
+    // Put
+    cache.put("key1", "value1");
+    
+    // Hit
+    assertEquals("value1", cache.get("key1"));
+    CacheTestUtils.assertCacheHit(cache, 1);
+}
+```
+
+## 10. Best Practices
+
+### 10.1 Cache Key Design
+```java
+// Good: Immutable, hashCode/equals implemented
+public record CacheKey(String userId, String productId) {}
+
+// Bad: Mutable, no proper hashCode/equals
+public class BadCacheKey {
+    private String userId;  // mutable
+    // No hashCode/equals
+}
+
+// Usage
+Cache<CacheKey, Order> orderCache = cacheManager.getCache("orders");
+Order order = orderCache.get(new CacheKey("user123", "prod456"));
+```
+
+### 10.2 TTL Selection
+```java
+public class CacheTTLStrategy {
+    
+    public Duration getTTL(String cacheType) {
+        return switch (cacheType) {
+            case "user-session" -> Duration.ofMinutes(30);
+            case "user-profile" -> Duration.ofMinutes(15);
+            case "product-catalog" -> Duration.ofHours(1);
+            case "config" -> Duration.ofHours(6);
+            case "static-content" -> Duration.ofDays(1);
+            default -> Duration.ofMinutes(10);
+        };
+    }
+}
+```
+
+### 10.3 Error Handling
+```java
+public class SafeCacheWrapper<K, V> implements Cache<K, V> {
+    private final Cache<K, V> delegate;
+    
+    @Override
+    public V get(K key) {
+        try {
+            return delegate.get(key);
+        } catch (Exception e) {
+            log.error("Cache get failed for key: {}", key, e);
+            return null;  // Fail gracefully
+        }
+    }
+    
+    @Override
+    public void put(K key, V value) {
+        try {
+            delegate.put(key, value);
+        } catch (Exception e) {
+            log.error("Cache put failed for key: {}", key, e);
+            // Don't throw - cache is optional
+        }
+    }
+}
+```
+
+This completes the Local In-Memory Cache Component Design with comprehensive requirements and implementation details!

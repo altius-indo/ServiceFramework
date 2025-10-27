@@ -1,0 +1,579 @@
+# Authentication Service Implementation Guide
+
+## 1. Project Setup
+
+### 1.1 Dependencies (Maven)
+```xml
+<project>
+    <properties>
+        <java.version>17</java.version>
+        <spring-boot.version>3.2.0</spring-boot.version>
+    </properties>
+    
+    <dependencies>
+        <!-- Spring Boot -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        
+        <!-- JWT -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.12.3</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.12.3</version>
+        </dependency>
+        
+        <!-- DynamoDB -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+            <version>2.21.0</version>
+        </dependency>
+        
+        <!-- Redis -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        
+        <!-- Password Hashing -->
+        <dependency>
+            <groupId>de.mkammerer</groupId>
+            <artifactId>argon2-jvm</artifactId>
+            <version>2.11</version>
+        </dependency>
+        
+        <!-- Metrics -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+    </dependencies>
+</project>
+```
+
+### 1.2 Application Configuration
+```yaml
+# application.yml
+spring:
+  application:
+    name: auth-service
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    
+server:
+  port: 8080
+
+aws:
+  dynamodb:
+    endpoint: ${DYNAMODB_ENDPOINT:http://localhost:8000}
+    region: ${AWS_REGION:us-east-1}
+    
+authentication:
+  jwt:
+    secret: ${JWT_SECRET}
+    access-token-ttl: 900  # 15 minutes
+    refresh-token-ttl: 2592000  # 30 days
+    issuer: auth-service
+    
+  session:
+    timeout: 3600  # 1 hour
+    max-concurrent: 5
+    
+  password:
+    min-length: 12
+    require-uppercase: true
+    require-lowercase: true
+    require-digits: true
+    require-special: true
+    history-count: 5
+    
+  mfa:
+    enabled: true
+    issuer: MyCompany
+```
+
+## 2. Step-by-Step Implementation
+
+### Step 1: Create Domain Models
+```java
+// User.java
+@Data
+@Builder
+public class User {
+    private String id;
+    private String tenantId;
+    private String username;
+    private String email;
+    private boolean emailVerified;
+    private String displayName;
+    private UserStatus status;
+    private Instant createdAt;
+    private Instant updatedAt;
+    private Instant lastLoginAt;
+    private Map<String, Object> metadata;
+}
+
+// UserCredentials.java
+@Data
+@Builder
+public class UserCredentials {
+    private String userId;
+    private String passwordHash;
+    private String hashAlgorithm;
+    private Instant passwordChangedAt;
+    private boolean mustChangePassword;
+    private int failedAttempts;
+    private Instant lockedUntil;
+}
+```
+
+### Step 2: Implement DynamoDB Repository
+```java
+@Repository
+public class UserRepository {
+    private final DynamoDbClient dynamoDb;
+    
+    public Optional<User> findById(String userId) {
+        GetItemRequest request = GetItemRequest.builder()
+            .tableName("Users")
+            .key(Map.of("id", AttributeValue.builder().s(userId).build()))
+            .build();
+            
+        GetItemResponse response = dynamoDb.getItem(request);
+        
+        if (!response.hasItem()) {
+            return Optional.empty();
+        }
+        
+        return Optional.of(mapToUser(response.item()));
+    }
+    
+    public Optional<User> findByUsername(String username) {
+        QueryRequest request = QueryRequest.builder()
+            .tableName("Users")
+            .indexName("UsernameIndex")
+            .keyConditionExpression("username = :username")
+            .expressionAttributeValues(Map.of(
+                ":username", AttributeValue.builder().s(username).build()
+            ))
+            .build();
+            
+        QueryResponse response = dynamoDb.query(request);
+        
+        if (response.items().isEmpty()) {
+            return Optional.empty();
+        }
+        
+        return Optional.of(mapToUser(response.items().get(0)));
+    }
+    
+    public void save(User user) {
+        PutItemRequest request = PutItemRequest.builder()
+            .tableName("Users")
+            .item(mapFromUser(user))
+            .build();
+            
+        dynamoDb.putItem(request);
+    }
+    
+    private User mapToUser(Map<String, AttributeValue> item) {
+        return User.builder()
+            .id(item.get("id").s())
+            .tenantId(item.get("tenant_id").s())
+            .username(item.get("username").s())
+            .email(item.get("email").s())
+            .emailVerified(item.get("email_verified").bool())
+            .displayName(item.get("display_name").s())
+            .status(UserStatus.valueOf(item.get("status").s()))
+            .createdAt(Instant.ofEpochMilli(Long.parseLong(item.get("created_at").n())))
+            .build();
+    }
+    
+    private Map<String, AttributeValue> mapFromUser(User user) {
+        return Map.of(
+            "id", AttributeValue.builder().s(user.getId()).build(),
+            "tenant_id", AttributeValue.builder().s(user.getTenantId()).build(),
+            "username", AttributeValue.builder().s(user.getUsername()).build(),
+            "email", AttributeValue.builder().s(user.getEmail()).build(),
+            "email_verified", AttributeValue.builder().bool(user.isEmailVerified()).build(),
+            "display_name", AttributeValue.builder().s(user.getDisplayName()).build(),
+            "status", AttributeValue.builder().s(user.getStatus().name()).build(),
+            "created_at", AttributeValue.builder().n(String.valueOf(user.getCreatedAt().toEpochMilli())).build()
+        );
+    }
+}
+```
+
+### Step 3: Implement JWT Token Manager
+```java
+@Service
+public class JwtTokenManager {
+    private final Key signingKey;
+    private final String issuer;
+    private final long accessTokenTtl;
+    private final long refreshTokenTtl;
+    
+    @Autowired
+    public JwtTokenManager(AuthConfig config) {
+        this.signingKey = Keys.hmacShaKeyFor(config.getJwtSecret().getBytes());
+        this.issuer = config.getJwtIssuer();
+        this.accessTokenTtl = config.getAccessTokenTtl();
+        this.refreshTokenTtl = config.getRefreshTokenTtl();
+    }
+    
+    public String generateAccessToken(User user) {
+        Instant now = Instant.now();
+        Instant expiration = now.plusSeconds(accessTokenTtl);
+        
+        return Jwts.builder()
+            .setSubject(user.getId())
+            .setIssuer(issuer)
+            .setIssuedAt(Date.from(now))
+            .setExpiration(Date.from(expiration))
+            .claim("username", user.getUsername())
+            .claim("email", user.getEmail())
+            .claim("tenantId", user.getTenantId())
+            .signWith(signingKey)
+            .compact();
+    }
+    
+    public String generateRefreshToken(User user) {
+        Instant now = Instant.now();
+        Instant expiration = now.plusSeconds(refreshTokenTtl);
+        
+        return Jwts.builder()
+            .setSubject(user.getId())
+            .setIssuer(issuer)
+            .setIssuedAt(Date.from(now))
+            .setExpiration(Date.from(expiration))
+            .claim("type", "refresh")
+            .signWith(signingKey)
+            .compact();
+    }
+    
+    public Claims validateToken(String token) {
+        try {
+            return Jwts.parserBuilder()
+                .setSigningKey(signingKey)
+                .requireIssuer(issuer)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+        } catch (JwtException e) {
+            throw new InvalidTokenException("Invalid token", e);
+        }
+    }
+}
+```
+
+### Step 4: Implement Authentication Service
+```java
+@Service
+@Slf4j
+public class AuthenticationService {
+    private final UserRepository userRepository;
+    private final CredentialManager credentialManager;
+    private final JwtTokenManager tokenManager;
+    private final SessionManager sessionManager;
+    private final AuditLogger auditLogger;
+    
+    public AuthResult authenticate(String username, String password, String ipAddress) {
+        // 1. Find user
+        Optional<User> userOpt = userRepository.findByUsername(username);
+        if (userOpt.isEmpty()) {
+            auditLogger.logAuthFailure(username, "USER_NOT_FOUND", ipAddress);
+            return AuthResult.failure("Invalid credentials");
+        }
+        
+        User user = userOpt.get();
+        
+        // 2. Check if account is locked
+        UserCredentials credentials = credentialManager.getCredentials(user.getId());
+        if (credentialManager.isLocked(credentials)) {
+            auditLogger.logAuthFailure(username, "ACCOUNT_LOCKED", ipAddress);
+            return AuthResult.failure("Account is locked");
+        }
+        
+        // 3. Verify password
+        if (!credentialManager.verifyPassword(password, credentials.getPasswordHash())) {
+            credentialManager.recordFailedAttempt(user.getId());
+            auditLogger.logAuthFailure(username, "INVALID_PASSWORD", ipAddress);
+            return AuthResult.failure("Invalid credentials");
+        }
+        
+        // 4. Reset failed attempts
+        credentialManager.resetFailedAttempts(user.getId());
+        
+        // 5. Generate tokens
+        String accessToken = tokenManager.generateAccessToken(user);
+        String refreshToken = tokenManager.generateRefreshToken(user);
+        
+        // 6. Create session
+        Session session = sessionManager.createSession(user.getId(), ipAddress);
+        
+        // 7. Audit log
+        auditLogger.logAuthSuccess(username, ipAddress);
+        
+        return AuthResult.builder()
+            .success(true)
+            .accessToken(accessToken)
+            .refreshToken(refreshToken)
+            .sessionId(session.getId())
+            .expiresIn(accessTokenTtl)
+            .build();
+    }
+    
+    public AuthResult refreshToken(String refreshToken) {
+        // 1. Validate refresh token
+        Claims claims = tokenManager.validateToken(refreshToken);
+        
+        // 2. Get user
+        String userId = claims.getSubject();
+        Optional<User> userOpt = userRepository.findById(userId);
+        
+        if (userOpt.isEmpty()) {
+            throw new InvalidTokenException("User not found");
+        }
+        
+        // 3. Generate new access token
+        String newAccessToken = tokenManager.generateAccessToken(userOpt.get());
+        
+        return AuthResult.builder()
+            .success(true)
+            .accessToken(newAccessToken)
+            .expiresIn(accessTokenTtl)
+            .build();
+    }
+}
+```
+
+### Step 5: Create REST Controller
+```java
+@RestController
+@RequestMapping("/auth/v1")
+@Slf4j
+public class AuthController {
+    private final AuthenticationService authService;
+    
+    @PostMapping("/login")
+    public ResponseEntity<AuthResponse> login(
+        @RequestBody @Valid LoginRequest request,
+        HttpServletRequest httpRequest
+    ) {
+        String ipAddress = getClientIp(httpRequest);
+        
+        AuthResult result = authService.authenticate(
+            request.getUsername(),
+            request.getPassword(),
+            ipAddress
+        );
+        
+        if (!result.isSuccess()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(AuthResponse.error(result.getError()));
+        }
+        
+        return ResponseEntity.ok(AuthResponse.builder()
+            .accessToken(result.getAccessToken())
+            .refreshToken(result.getRefreshToken())
+            .tokenType("Bearer")
+            .expiresIn(result.getExpiresIn())
+            .build());
+    }
+    
+    @PostMapping("/refresh")
+    public ResponseEntity<AuthResponse> refresh(@RequestBody RefreshRequest request) {
+        AuthResult result = authService.refreshToken(request.getRefreshToken());
+        
+        return ResponseEntity.ok(AuthResponse.builder()
+            .accessToken(result.getAccessToken())
+            .tokenType("Bearer")
+            .expiresIn(result.getExpiresIn())
+            .build());
+    }
+    
+    @PostMapping("/logout")
+    public ResponseEntity<Void> logout(@RequestHeader("Authorization") String token) {
+        authService.logout(extractToken(token));
+        return ResponseEntity.noContent().build();
+    }
+}
+```
+
+### Step 6: Add Security Filter
+```java
+@Component
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+    private final JwtTokenManager tokenManager;
+    
+    @Override
+    protected void doFilterInternal(
+        HttpServletRequest request,
+        HttpServletResponse response,
+        FilterChain filterChain
+    ) throws ServletException, IOException {
+        
+        String token = extractToken(request);
+        
+        if (token != null) {
+            try {
+                Claims claims = tokenManager.validateToken(token);
+                
+                // Set authentication in context
+                Authentication auth = new JwtAuthentication(claims);
+                SecurityContextHolder.getContext().setAuthentication(auth);
+                
+            } catch (Exception e) {
+                log.error("Invalid token", e);
+            }
+        }
+        
+        filterChain.doFilter(request, response);
+    }
+    
+    private String extractToken(HttpServletRequest request) {
+        String header = request.getHeader("Authorization");
+        if (header != null && header.startsWith("Bearer ")) {
+            return header.substring(7);
+        }
+        return null;
+    }
+}
+```
+
+## 3. Testing
+
+### Unit Tests
+```java
+@SpringBootTest
+class AuthenticationServiceTest {
+    
+    @Mock
+    private UserRepository userRepository;
+    
+    @Mock
+    private CredentialManager credentialManager;
+    
+    @InjectMocks
+    private AuthenticationService authService;
+    
+    @Test
+    void testSuccessfulAuthentication() {
+        // Arrange
+        User user = User.builder()
+            .id("user-123")
+            .username("alice")
+            .build();
+            
+        UserCredentials credentials = UserCredentials.builder()
+            .userId("user-123")
+            .passwordHash("$argon2...")
+            .build();
+            
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
+        when(credentialManager.getCredentials("user-123")).thenReturn(credentials);
+        when(credentialManager.verifyPassword(any(), any())).thenReturn(true);
+        
+        // Act
+        AuthResult result = authService.authenticate("alice", "password123", "127.0.0.1");
+        
+        // Assert
+        assertTrue(result.isSuccess());
+        assertNotNull(result.getAccessToken());
+        assertNotNull(result.getRefreshToken());
+    }
+}
+```
+
+## 4. Deployment
+
+### Docker Compose
+```yaml
+version: '3.8'
+
+services:
+  auth-service:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - REDIS_HOST=redis
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      - redis
+      - dynamodb-local
+      
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+      
+  dynamodb-local:
+    image: amazon/dynamodb-local
+    ports:
+      - "8000:8000"
+```
+
+### Kubernetes Deployment
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      containers:
+      - name: auth-service
+        image: auth-service:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: auth-secrets
+              key: jwt-secret
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 5
+```
+
+This implementation guide provides a complete walkthrough for building the Authentication service. Would you like me to continue with the inter-component communication patterns next?

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/jyoti.sanyal/work/claude-code/projects/ServiceFramework/enterprise-service-framework/gradlew build)",
+      "Bash(./gradlew:*)",
+      "Bash(java:*)",
+      "Bash(ls:*)",
+      "Bash(curl:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

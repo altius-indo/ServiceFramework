@@ -1,0 +1,958 @@
+# Throttling Component Design
+
+## 1. Overview
+
+### 1.1 Purpose
+The Throttling component manages request flow, prevents system overload, implements backpressure mechanisms, and provides circuit breaking capabilities. It ensures system stability under high load and prevents cascading failures.
+
+### 1.2 Design Principles
+- **Load Protection**: Prevent system overload and resource exhaustion
+- **Graceful Degradation**: Maintain partial functionality under stress
+- **Fair Resource Allocation**: Prevent noisy neighbor problems
+- **Adaptive Throttling**: Dynamically adjust limits based on system health
+- **Backpressure Propagation**: Signal upstream services to slow down
+
+## 2. Architecture
+
+### 2.1 High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Load Balancer / Edge Layer                    │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────┴────────────────────────────────────┐
+│                   Throttling Service                             │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Throttle API │  │ Queue Manager│  │ Circuit      │          │
+│  │              │  │              │  │ Breaker Mgr  │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+│  ┌──────┴──────────────────┴──────────────────┴───────┐         │
+│  │          Throttling Engine (Core)                   │         │
+│  │                                                      │         │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │         │
+│  │  │ Request  │  │ Concurr- │  │ Priority │         │         │
+│  │  │ Throttle │  │  ency    │  │  Queue   │         │         │
+│  │  │          │  │ Control  │  │          │         │         │
+│  │  └──────────┘  └──────────┘  └──────────┘         │         │
+│  │                                                      │         │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │         │
+│  │  │ Backpres-│  │ Circuit  │  │ Adaptive │         │         │
+│  │  │  sure    │  │ Breaker  │  │ Throttle │         │         │
+│  │  │          │  │          │  │          │         │         │
+│  │  └──────────┘  └──────────┘  └──────────┘         │         │
+│  └──────────────────────────────────────────────────┘         │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Load Monitor │  │ Policy       │  │ Anomaly      │          │
+│  │              │  │ Engine       │  │ Detector     │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+└─────────┴──────────────────┴──────────────────┴───────────────┘
+          │                  │                  │
+┌─────────▼────────┐  ┌──────▼───────┐  ┌─────▼──────────┐
+│  Queue State     │  │ Policy Store │  │ Metrics Store  │
+│  (Redis)         │  │ (DynamoDB)   │  │ (Redis)        │
+└──────────────────┘  └──────────────┘  └────────────────┘
+```
+
+### 2.2 Component Breakdown
+
+#### 2.2.1 Throttling Service
+**Responsibilities**:
+- Entry point for throttling decisions
+- Request queuing and prioritization
+- Circuit breaker management
+- Backpressure signaling
+
+**API Endpoints**:
+```
+# Throttling operations
+POST   /throttle/v1/check
+POST   /throttle/v1/acquire
+POST   /throttle/v1/release
+GET    /throttle/v1/status
+
+# Queue management
+GET    /throttle/v1/queue/{queueId}
+POST   /throttle/v1/queue/{queueId}/enqueue
+POST   /throttle/v1/queue/{queueId}/dequeue
+DELETE /throttle/v1/queue/{queueId}/clear
+
+# Circuit breaker
+GET    /throttle/v1/circuit-breaker/{serviceId}
+POST   /throttle/v1/circuit-breaker/{serviceId}/open
+POST   /throttle/v1/circuit-breaker/{serviceId}/close
+POST   /throttle/v1/circuit-breaker/{serviceId}/reset
+
+# Policy management
+GET    /throttle/v1/policies
+POST   /throttle/v1/policies
+PUT    /throttle/v1/policies/{policyId}
+DELETE /throttle/v1/policies/{policyId}
+
+# Health and metrics
+GET    /throttle/v1/health
+GET    /throttle/v1/metrics
+```
+
+#### 2.2.2 Throttling Engine
+**Responsibilities**:
+- Evaluate throttling decisions
+- Manage request queues
+- Implement backpressure
+- Coordinate circuit breakers
+
+**Core Interfaces**:
+```java
+public interface ThrottlingEngine {
+    ThrottleResult check(ThrottleRequest request);
+    QueueResult enqueue(ThrottleRequest request);
+    void release(String requestId);
+    ThrottleStatus getStatus(String key);
+}
+
+public class ThrottleRequest {
+    String key;                     // User, tenant, or service ID
+    String resource;                // Service or endpoint
+    int priority;                   // Request priority (0-10)
+    long deadline;                  // Request deadline (ms)
+    Map<String, String> context;    // Additional context
+    long timestamp;
+}
+
+public class ThrottleResult {
+    boolean allowed;
+    String reason;
+    long retryAfter;                // Seconds until retry
+    int queuePosition;              // Position in queue (if queued)
+    ThrottleMetrics metrics;
+}
+
+public class ThrottleMetrics {
+    int concurrentRequests;
+    int queueDepth;
+    double systemLoad;
+    long avgProcessingTime;
+    double errorRate;
+}
+```
+
+#### 2.2.3 Concurrency Controller
+**Responsibilities**:
+- Limit concurrent requests
+- Implement semaphore-based control
+- Track active requests
+- Release resources on completion
+
+**Implementation**:
+```java
+public class ConcurrencyController {
+    private final RedisTemplate<String, String> redis;
+    
+    public ConcurrencyResult acquire(String key, int maxConcurrent) {
+        String requestId = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        long timeout = 30000; // 30 seconds
+        
+        // Lua script for atomic acquire
+        String script = """
+            local key = KEYS[1]
+            local limit = tonumber(ARGV[1])
+            local request_id = ARGV[2]
+            local now = tonumber(ARGV[3])
+            local timeout = tonumber(ARGV[4])
+            
+            -- Remove expired requests
+            redis.call('ZREMRANGEBYSCORE', key, '-inf', now - timeout)
+            
+            -- Check current count
+            local count = redis.call('ZCARD', key)
+            
+            if count < limit then
+                -- Add new request
+                redis.call('ZADD', key, now, request_id)
+                redis.call('EXPIRE', key, 60)
+                return {1, request_id, limit - count - 1}
+            else
+                return {0, '', 0}
+            end
+            """;
+        
+        List<Object> result = redis.execute(
+            script,
+            List.of(key),
+            maxConcurrent, requestId, now, timeout
+        );
+        
+        boolean acquired = (Long)result.get(0) == 1;
+        String id = (String)result.get(1);
+        long remaining = (Long)result.get(2);
+        
+        return ConcurrencyResult.builder()
+            .acquired(acquired)
+            .requestId(id)
+            .remaining(remaining)
+            .build();
+    }
+    
+    public void release(String key, String requestId) {
+        redis.opsForZSet().remove(key, requestId);
+    }
+}
+```
+
+#### 2.2.4 Priority Queue Manager
+**Responsibilities**:
+- Manage request queues with priorities
+- Implement fair scheduling
+- Prevent starvation
+- Handle queue overflow
+
+**Queue Schema** (Redis):
+```
+# Priority queues (using sorted sets)
+throttle:queue:{queueId}:p0 -> ZSET[(score=deadline, member=requestId), ...]
+throttle:queue:{queueId}:p1 -> ZSET[(score=deadline, member=requestId), ...]
+throttle:queue:{queueId}:p2 -> ZSET[(score=deadline, member=requestId), ...]
+
+# Request details
+throttle:request:{requestId} -> {
+    key: string,
+    resource: string,
+    priority: int,
+    deadline: long,
+    enqueuedAt: long,
+    context: object
+}
+TTL: 3600 seconds
+
+# Queue metadata
+throttle:queue:{queueId}:meta -> {
+    maxDepth: int,
+    currentDepth: int,
+    overflowPolicy: string,
+    lastProcessed: long
+}
+```
+
+**Implementation**:
+```java
+public class PriorityQueueManager {
+    private final RedisTemplate<String, String> redis;
+    
+    public QueueResult enqueue(String queueId, ThrottleRequest request) {
+        String requestId = UUID.randomUUID().toString();
+        String queueKey = buildQueueKey(queueId, request.priority);
+        
+        // Check queue depth
+        QueueMetadata meta = getQueueMetadata(queueId);
+        if (meta.currentDepth >= meta.maxDepth) {
+            return handleOverflow(queueId, request, meta);
+        }
+        
+        // Store request details
+        storeRequest(requestId, request);
+        
+        // Add to priority queue (score = deadline for deadline-aware processing)
+        redis.opsForZSet().add(
+            queueKey,
+            requestId,
+            request.deadline
+        );
+        
+        // Update metadata
+        incrementQueueDepth(queueId);
+        
+        return QueueResult.builder()
+            .queued(true)
+            .requestId(requestId)
+            .position(getQueuePosition(queueKey, requestId))
+            .estimatedWaitTime(estimateWaitTime(queueId))
+            .build();
+    }
+    
+    public ThrottleRequest dequeue(String queueId) {
+        // Try priorities from high to low with weighted fair scheduling
+        for (int priority = 10; priority >= 0; priority--) {
+            if (shouldProcessPriority(priority)) {
+                String queueKey = buildQueueKey(queueId, priority);
+                
+                // Get request with earliest deadline
+                Set<String> requests = redis.opsForZSet()
+                    .range(queueKey, 0, 0);
+                
+                if (!requests.isEmpty()) {
+                    String requestId = requests.iterator().next();
+                    redis.opsForZSet().remove(queueKey, requestId);
+                    decrementQueueDepth(queueId);
+                    
+                    ThrottleRequest request = getRequest(requestId);
+                    redis.delete("throttle:request:" + requestId);
+                    
+                    return request;
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    private boolean shouldProcessPriority(int priority) {
+        // Weighted fair scheduling: higher priority = higher probability
+        // Prevents starvation by occasionally processing lower priorities
+        int weight = (priority + 1) * 10;
+        int random = ThreadLocalRandom.current().nextInt(100);
+        return random < weight;
+    }
+    
+    private QueueResult handleOverflow(
+        String queueId, 
+        ThrottleRequest request,
+        QueueMetadata meta
+    ) {
+        return switch (meta.overflowPolicy) {
+            case "REJECT" -> QueueResult.rejected("Queue full");
+            case "DROP_OLDEST" -> {
+                dropOldestRequest(queueId);
+                yield enqueue(queueId, request);
+            }
+            case "SPILLOVER" -> enqueueToSpillover(queueId, request);
+            default -> QueueResult.rejected("Unknown overflow policy");
+        };
+    }
+}
+```
+
+#### 2.2.5 Circuit Breaker
+**Responsibilities**:
+- Detect service failures
+- Open circuit on threshold breach
+- Test recovery in half-open state
+- Close circuit on recovery
+
+**Circuit Breaker Schema** (DynamoDB):
+```javascript
+// Circuit Breakers Table
+{
+  TableName: "CircuitBreakers",
+  KeySchema: [
+    { AttributeName: "service_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "service_id", AttributeType: "S" },
+    { AttributeName: "state", AttributeType: "S" },
+    { AttributeName: "updated_at", AttributeType: "N" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "StateIndex",
+      KeySchema: [
+        { AttributeName: "state", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "UpdatedAtIndex",
+      KeySchema: [
+        { AttributeName: "updated_at", KeyType: "HASH" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "service_id": "payment-service",
+  "state": "OPEN",  // CLOSED, OPEN, HALF_OPEN
+  "failure_count": 15,
+  "success_count": 0,
+  "last_failure_time": 1704067200000,
+  "state_changed_at": 1704067200000,
+  "config": {
+    "failure_threshold": 10,
+    "success_threshold": 5,
+    "timeout_ms": 5000,
+    "half_open_timeout_ms": 30000,
+    "open_timeout_ms": 60000
+  },
+  "metrics": {
+    "total_calls": 1000,
+    "failed_calls": 15,
+    "success_rate": 0.985,
+    "avg_response_time_ms": 250
+  },
+  "updated_at": 1704067200000
+}
+```
+
+**Implementation**:
+```java
+public class CircuitBreaker {
+    private final DynamoDB dynamoDB;
+    private final String serviceId;
+    
+    public CircuitBreakerResult executeWithCircuitBreaker(
+        Callable<Response> operation
+    ) {
+        CircuitBreakerState state = getState();
+        
+        return switch (state.state) {
+            case CLOSED -> executeClosed(operation, state);
+            case OPEN -> executeOpen(state);
+            case HALF_OPEN -> executeHalfOpen(operation, state);
+        };
+    }
+    
+    private CircuitBreakerResult executeClosed(
+        Callable<Response> operation,
+        CircuitBreakerState state
+    ) {
+        try {
+            Response response = operation.call();
+            recordSuccess();
+            return CircuitBreakerResult.success(response);
+        } catch (Exception e) {
+            recordFailure();
+            
+            // Check if should open circuit
+            if (state.failureCount + 1 >= state.config.failureThreshold) {
+                transitionToOpen();
+            }
+            
+            return CircuitBreakerResult.failure(e);
+        }
+    }
+    
+    private CircuitBreakerResult executeOpen(CircuitBreakerState state) {
+        long now = System.currentTimeMillis();
+        long timeSinceOpen = now - state.stateChangedAt;
+        
+        // Check if should transition to half-open
+        if (timeSinceOpen >= state.config.openTimeoutMs) {
+            transitionToHalfOpen();
+            return executeWithCircuitBreaker(() -> null); // Retry
+        }
+        
+        // Circuit is open, fail fast
+        return CircuitBreakerResult.circuitOpen(
+            state.config.openTimeoutMs - timeSinceOpen
+        );
+    }
+    
+    private CircuitBreakerResult executeHalfOpen(
+        Callable<Response> operation,
+        CircuitBreakerState state
+    ) {
+        try {
+            Response response = operation.call();
+            recordSuccess();
+            
+            // Check if should close circuit
+            if (state.successCount + 1 >= state.config.successThreshold) {
+                transitionToClosed();
+            }
+            
+            return CircuitBreakerResult.success(response);
+        } catch (Exception e) {
+            // Single failure in half-open state reopens circuit
+            transitionToOpen();
+            return CircuitBreakerResult.failure(e);
+        }
+    }
+    
+    private void transitionToOpen() {
+        updateState(CircuitBreakerState.builder()
+            .state(State.OPEN)
+            .stateChangedAt(System.currentTimeMillis())
+            .build()
+        );
+        
+        // Send alert
+        alertService.sendCircuitBreakerAlert(serviceId, State.OPEN);
+    }
+    
+    private void transitionToHalfOpen() {
+        updateState(CircuitBreakerState.builder()
+            .state(State.HALF_OPEN)
+            .successCount(0)
+            .stateChangedAt(System.currentTimeMillis())
+            .build()
+        );
+    }
+    
+    private void transitionToClosed() {
+        updateState(CircuitBreakerState.builder()
+            .state(State.CLOSED)
+            .failureCount(0)
+            .successCount(0)
+            .stateChangedAt(System.currentTimeMillis())
+            .build()
+        );
+        
+        // Send recovery alert
+        alertService.sendCircuitBreakerAlert(serviceId, State.CLOSED);
+    }
+}
+```
+
+#### 2.2.6 Backpressure Manager
+**Responsibilities**:
+- Detect system overload
+- Signal upstream to slow down
+- Implement flow control
+- Provide feedback mechanisms
+
+**Implementation**:
+```java
+public class BackpressureManager {
+    
+    public BackpressureSignal checkBackpressure(String service) {
+        SystemMetrics metrics = loadMonitor.getMetrics(service);
+        
+        // Calculate backpressure level based on multiple factors
+        double cpuLoad = metrics.getCpuUtilization();
+        double memoryLoad = metrics.getMemoryUtilization();
+        int queueDepth = metrics.getQueueDepth();
+        double errorRate = metrics.getErrorRate();
+        long responseTime = metrics.getAvgResponseTime();
+        
+        // Weighted backpressure calculation
+        double backpressure = calculateBackpressure(
+            cpuLoad, memoryLoad, queueDepth, errorRate, responseTime
+        );
+        
+        return BackpressureSignal.builder()
+            .level(mapToLevel(backpressure))
+            .retryAfter(calculateRetryAfter(backpressure))
+            .currentLoad(backpressure)
+            .metrics(metrics)
+            .build();
+    }
+    
+    private double calculateBackpressure(
+        double cpu,
+        double memory,
+        int queueDepth,
+        double errorRate,
+        long responseTime
+    ) {
+        // Normalize metrics to 0-1 scale
+        double cpuScore = Math.min(cpu / 100.0, 1.0);
+        double memoryScore = Math.min(memory / 100.0, 1.0);
+        double queueScore = Math.min(queueDepth / 1000.0, 1.0);
+        double errorScore = Math.min(errorRate / 0.1, 1.0);  // 10% error rate = 1.0
+        double latencyScore = Math.min(responseTime / 5000.0, 1.0);  // 5s = 1.0
+        
+        // Weighted combination
+        return (cpuScore * 0.3 +
+                memoryScore * 0.2 +
+                queueScore * 0.2 +
+                errorScore * 0.2 +
+                latencyScore * 0.1);
+    }
+    
+    private BackpressureLevel mapToLevel(double score) {
+        if (score < 0.5) return BackpressureLevel.NONE;
+        if (score < 0.7) return BackpressureLevel.LOW;
+        if (score < 0.85) return BackpressureLevel.MEDIUM;
+        if (score < 0.95) return BackpressureLevel.HIGH;
+        return BackpressureLevel.CRITICAL;
+    }
+    
+    public void propagateBackpressure(
+        String targetService,
+        BackpressureSignal signal
+    ) {
+        // Set HTTP headers for backpressure
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Backpressure-Level", signal.level.toString());
+        headers.set("Retry-After", String.valueOf(signal.retryAfter));
+        
+        // Update service mesh policies
+        serviceMesh.updateTrafficPolicy(targetService, TrafficPolicy.builder()
+            .connectionPoolSize(calculatePoolSize(signal.level))
+            .requestTimeout(calculateTimeout(signal.level))
+            .build()
+        );
+    }
+}
+```
+
+#### 2.2.7 Adaptive Throttling
+**Responsibilities**:
+- Monitor system health
+- Dynamically adjust throttle limits
+- Implement feedback control
+- Learn optimal thresholds
+
+**Implementation**:
+```java
+public class AdaptiveThrottlingEngine {
+    private final LoadMonitor loadMonitor;
+    private final ThrottleConfig config;
+    
+    @Scheduled(fixedRate = 5000) // Every 5 seconds
+    public void adjustThrottleLimits() {
+        SystemMetrics current = loadMonitor.getCurrentMetrics();
+        SystemMetrics target = config.getTargetMetrics();
+        
+        // Calculate adjustment factor using PID controller
+        double adjustment = pidController.calculate(
+            current.getCpuUtilization(),
+            target.getCpuUtilization()
+        );
+        
+        // Apply adjustment to throttle limits
+        for (ThrottlePolicy policy : policyManager.getActivePolicies()) {
+            int currentLimit = policy.getLimit();
+            int newLimit = (int)(currentLimit * (1 + adjustment));
+            
+            // Ensure within bounds
+            newLimit = Math.max(policy.getMinLimit(), newLimit);
+            newLimit = Math.min(policy.getMaxLimit(), newLimit);
+            
+            if (newLimit != currentLimit) {
+                updateThrottleLimit(policy.getId(), newLimit);
+                
+                log.info("Adjusted throttle limit for {}: {} -> {}",
+                    policy.getName(), currentLimit, newLimit);
+            }
+        }
+    }
+    
+    // PID Controller for smooth adjustments
+    private static class PIDController {
+        private double kp = 0.5;  // Proportional gain
+        private double ki = 0.1;  // Integral gain
+        private double kd = 0.2;  // Derivative gain
+        
+        private double integral = 0;
+        private double previousError = 0;
+        
+        public double calculate(double current, double target) {
+            double error = target - current;
+            
+            // Proportional term
+            double p = kp * error;
+            
+            // Integral term
+            integral += error;
+            double i = ki * integral;
+            
+            // Derivative term
+            double derivative = error - previousError;
+            double d = kd * derivative;
+            
+            previousError = error;
+            
+            // Combined output (clamped to reasonable range)
+            double output = p + i + d;
+            return Math.max(-0.5, Math.min(0.5, output));
+        }
+    }
+}
+```
+
+## 3. Data Models
+
+### 3.1 Throttle Policies (DynamoDB)
+```javascript
+// Throttle Policies Table
+{
+  TableName: "ThrottlePolicies",
+  KeySchema: [
+    { AttributeName: "policy_id", KeyType: "HASH" }
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "policy_id", AttributeType: "S" },
+    { AttributeName: "priority", AttributeType: "N" },
+    { AttributeName: "enabled", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "PriorityIndex",
+      KeySchema: [
+        { AttributeName: "priority", KeyType: "HASH" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "EnabledIndex",
+      KeySchema: [
+        { AttributeName: "enabled", KeyType: "HASH" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "policy_id": "policy-123",
+  "name": "API Throttle Policy",
+  "description": "Throttle API requests based on load",
+  "type": "adaptive",  // static, adaptive, load_based
+  "config": {
+    "max_concurrent": 1000,
+    "max_queue_depth": 5000,
+    "queue_timeout_ms": 30000,
+    "overflow_policy": "REJECT",  // REJECT, DROP_OLDEST, SPILLOVER
+    "priority_levels": 11
+  },
+  "triggers": [
+    {
+      "metric": "cpu_utilization",
+      "threshold": 80,
+      "action": "reduce_limit",
+      "adjustment": -0.2
+    },
+    {
+      "metric": "error_rate",
+      "threshold": 0.05,
+      "action": "reduce_limit",
+      "adjustment": -0.3
+    }
+  ],
+  "priority": 100,
+  "enabled": "true",
+  "created_at": 1704067200000,
+  "updated_at": 1704067200000
+}
+```
+
+### 3.2 System Metrics (Redis)
+```
+# Current system metrics
+throttle:metrics:{service}:current -> {
+    cpu_utilization: 75.5,
+    memory_utilization: 60.2,
+    queue_depth: 234,
+    concurrent_requests: 450,
+    error_rate: 0.02,
+    avg_response_time_ms: 150,
+    p95_response_time_ms: 450,
+    timestamp: 1704067200000
+}
+TTL: 300 seconds
+
+# Historical metrics (time series)
+throttle:metrics:{service}:history -> ZSET[
+    (score=timestamp, member=metricsJson),
+    ...
+]
+# Keep last 1 hour
+```
+
+## 4. Integration Points
+
+### 4.1 API Gateway Integration
+```java
+public class ThrottleFilter implements GatewayFilter {
+    private final ThrottlingEngine throttlingEngine;
+    
+    @Override
+    public void filter(Request request, Response response) {
+        String key = extractKey(request);
+        String resource = request.getPath();
+        
+        ThrottleRequest throttleReq = ThrottleRequest.builder()
+            .key(key)
+            .resource(resource)
+            .priority(extractPriority(request))
+            .deadline(System.currentTimeMillis() + 30000)
+            .build();
+        
+        ThrottleResult result = throttlingEngine.check(throttleReq);
+        
+        if (!result.allowed) {
+            // Apply backpressure
+            response.setStatus(503);  // Service Unavailable
+            response.addHeader("Retry-After", 
+                String.valueOf(result.retryAfter));
+            response.addHeader("X-Throttle-Reason", result.reason);
+            response.addHeader("X-Queue-Position", 
+                String.valueOf(result.queuePosition));
+            
+            response.setBody(Map.of(
+                "error", "Service Temporarily Unavailable",
+                "reason", result.reason,
+                "retry_after_seconds", result.retryAfter
+            ));
+            return;
+        }
+        
+        // Add throttle metadata to request
+        request.setAttribute("throttle.metrics", result.metrics);
+    }
+}
+```
+
+### 4.2 Service Mesh Integration
+```yaml
+# Envoy configuration for throttling
+http_filters:
+  - name: envoy.filters.http.local_ratelimit
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+      stat_prefix: http_local_rate_limiter
+      token_bucket:
+        max_tokens: 1000
+        tokens_per_fill: 1000
+        fill_interval: 1s
+      filter_enabled:
+        runtime_key: local_rate_limit_enabled
+        default_value:
+          numerator: 100
+          denominator: HUNDRED
+      filter_enforced:
+        runtime_key: local_rate_limit_enforced
+        default_value:
+          numerator: 100
+          denominator: HUNDRED
+          
+  - name: envoy.filters.http.adaptive_concurrency
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.adaptive_concurrency.v3.AdaptiveConcurrency
+      gradient_controller_config:
+        sample_aggregate_percentile:
+          value: 95
+        concurrency_limit_params:
+          max_concurrency_limit: 1000
+          concurrency_update_interval: 0.1s
+        min_rtt_calc_params:
+          jitter:
+            value: 10
+          interval: 30s
+          request_count: 50
+```
+
+## 5. Performance Considerations
+
+### 5.1 Redis Data Structures
+```
+# Use Redis Streams for queue management (better than sorted sets for high throughput)
+XADD throttle:queue:{queueId} * 
+    requestId req-123 
+    priority 5 
+    deadline 1704067500000
+    
+# Consumer groups for parallel processing
+XREADGROUP GROUP workers consumer-1 COUNT 10 
+    STREAMS throttle:queue:{queueId} >
+
+# Use HyperLogLog for approximate counting
+PFADD throttle:concurrent:{service} request-1 request-2
+PFCOUNT throttle:concurrent:{service}
+```
+
+### 5.2 Performance Targets
+- Throttle check: < 5ms p95
+- Queue enqueue/dequeue: < 10ms p95
+- Circuit breaker check: < 1ms p95
+- Throughput: 100K+ throttle checks/second
+
+## 6. Monitoring
+
+### 6.1 Metrics
+```
+# Throttling metrics
+throttle_requests_total{result}
+throttle_queued_requests
+throttle_queue_depth{queue_id}
+throttle_queue_wait_time_seconds
+throttle_rejected_requests_total{reason}
+
+# Circuit breaker metrics
+circuit_breaker_state{service_id, state}
+circuit_breaker_transitions_total{service_id, from_state, to_state}
+circuit_breaker_failures_total{service_id}
+circuit_breaker_successes_total{service_id}
+
+# Backpressure metrics
+backpressure_level{service_id}
+backpressure_signals_sent_total{service_id, level}
+
+# Concurrency metrics
+concurrent_requests{service_id}
+concurrent_limit{service_id}
+concurrent_requests_rejected_total{service_id}
+
+# System metrics
+system_cpu_utilization{service_id}
+system_memory_utilization{service_id}
+system_queue_depth{service_id}
+system_error_rate{service_id}
+```
+
+### 6.2 Alerting
+```yaml
+alerts:
+  - name: HighQueueDepth
+    condition: |
+      throttle_queue_depth > 1000
+    severity: warning
+    description: Queue depth exceeds threshold
+    
+  - name: CircuitBreakerOpen
+    condition: |
+      circuit_breaker_state{state="OPEN"} == 1
+    severity: critical
+    description: Circuit breaker opened for service
+    
+  - name: HighBackpressure
+    condition: |
+      backpressure_level >= 4
+    severity: warning
+    description: High backpressure detected
+    
+  - name: ThrottleRejectionsHigh
+    condition: |
+      rate(throttle_rejected_requests_total[5m]) > 100
+    severity: warning
+    description: High rate of throttled requests
+```
+
+## 7. Configuration
+
+### 7.1 Service Configuration
+```yaml
+throttling:
+  service:
+    port: 8080
+    thread_pool_size: 200
+    
+  concurrency:
+    max_concurrent_requests: 1000
+    timeout_ms: 30000
+    
+  queuing:
+    enabled: true
+    max_queue_depth: 5000
+    queue_timeout_ms: 30000
+    overflow_policy: REJECT
+    priority_levels: 11
+    
+  circuit_breaker:
+    failure_threshold: 10
+    success_threshold: 5
+    open_timeout_ms: 60000
+    half_open_timeout_ms: 30000
+    
+  backpressure:
+    enabled: true
+    cpu_threshold: 80
+    memory_threshold: 85
+    error_rate_threshold: 0.05
+    
+  adaptive:
+    enabled: true
+    adjustment_interval_ms: 5000
+    min_limit: 100
+    max_limit: 10000
+    pid_kp: 0.5
+    pid_ki: 0.1
+    pid_kd: 0.2
+```
+
+This completes the Throttling Component Design. Would you like me to continue with the Distributed Tracing Component Design next?

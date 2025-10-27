@@ -1,0 +1,1952 @@
+**Permission Storage** (DynamoDB / Key-Value Store):
+```javascript
+// User Permissions Table
+{
+  TableName: "UserPermissions",
+  KeySchema: [
+    { AttributeName: "permission_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "permission_id", AttributeType: "S" },
+    { AttributeName: "user_id", AttributeType: "S" },
+    { AttributeName: "resource_key", AttributeType: "S" },  // resource_type:resource_id
+    { AttributeName: "expires_at", AttributeType: "N" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "UserIndex",
+      KeySchema: [
+        { AttributeName: "user_id", KeyType: "HASH" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "ResourceIndex",
+      KeySchema: [
+        { AttributeName: "resource_key", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "ExpirationIndex",
+      KeySchema: [
+        { AttributeName: "expires_at", KeyType: "HASH" }
+      ]
+    }
+  ],
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure
+{
+  "permission_id": "perm-123",
+  "user_id": "user-456",
+  "permission": "document:read",
+  "resource_type": "document",
+  "resource_id": "doc-789",
+  "resource_key":# Authorization Component Design
+
+## 1. Overview
+
+### 1.1 Purpose
+The Authorization component enforces access control decisions across the enterprise framework. It supports multiple authorization models (RBAC, ABAC, ReBAC), evaluates policies in real-time, and provides fine-grained permission management.
+
+### 1.2 Design Principles
+- **Zero Trust**: Never trust, always verify
+- **Least Privilege**: Default deny with explicit allow
+- **Policy as Code**: Declarative policy definitions
+- **Performance**: Sub-10ms authorization decisions
+- **Auditability**: Complete audit trail of all decisions
+
+## 2. Architecture
+
+### 2.1 High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    API Gateway / Service Mesh                    │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────┴────────────────────────────────────┐
+│                   Authorization Service                          │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Authz API    │  │ Policy Admin │  │ Permission   │          │
+│  │ Gateway      │  │ API          │  │ Query API    │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+│  ┌──────┴──────────────────┴──────────────────┴───────┐         │
+│  │         Authorization Engine (Core)                 │         │
+│  │                                                      │         │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │         │
+│  │  │   RBAC   │  │   ABAC   │  │  ReBAC   │         │         │
+│  │  │  Engine  │  │  Engine  │  │  Engine  │         │         │
+│  │  └──────────┘  └──────────┘  └──────────┘         │         │
+│  │                                                      │         │
+│  │  ┌──────────────────────────────────────┐         │         │
+│  │  │      Policy Decision Point (PDP)      │         │         │
+│  │  │  ┌────────────┐  ┌────────────┐      │         │         │
+│  │  │  │ OPA/Rego   │  │   Cedar    │      │         │         │
+│  │  │  │  Engine    │  │   Engine   │      │         │         │
+│  │  │  └────────────┘  └────────────┘      │         │         │
+│  │  └──────────────────────────────────────┘         │         │
+│  └──────────────────────────────────────────────────┘         │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Permission   │  │ Policy       │  │ Decision     │          │
+│  │ Manager      │  │ Manager      │  │ Cache        │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+└─────────┴──────────────────┴──────────────────┴───────────────┘
+          │                  │                  │
+┌─────────▼───────┐  ┌───────▼────────┐  ┌─────▼──────────┐
+│  Permission DB  │  │  Policy Store  │  │ Decision Cache │
+│  (PostgreSQL)   │  │  (PostgreSQL)  │  │    (Redis)     │
+└─────────────────┘  └────────────────┘  └────────────────┘
+          │                  │                  │
+┌─────────▼────────────────────▼─────────────────▼──────────┐
+│            Authorization Audit Log (Kafka)                 │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 Component Breakdown
+
+#### 2.2.1 Authorization Service
+**Responsibilities**:
+- Entry point for authorization requests
+- Request validation and routing
+- Response caching and optimization
+- Performance monitoring
+
+**API Endpoints**:
+```
+# Authorization checks
+POST   /authz/v1/check
+POST   /authz/v1/batch-check
+POST   /authz/v1/query-permissions
+
+# Permission management
+GET    /authz/v1/permissions/{userId}
+POST   /authz/v1/permissions/grant
+DELETE /authz/v1/permissions/revoke
+GET    /authz/v1/permissions/resources/{resourceId}
+
+# Role management
+GET    /authz/v1/roles
+POST   /authz/v1/roles
+PUT    /authz/v1/roles/{roleId}
+DELETE /authz/v1/roles/{roleId}
+POST   /authz/v1/roles/{roleId}/assign
+DELETE /authz/v1/roles/{roleId}/unassign
+
+# Policy management
+GET    /authz/v1/policies
+POST   /authz/v1/policies
+PUT    /authz/v1/policies/{policyId}
+DELETE /authz/v1/policies/{policyId}
+POST   /authz/v1/policies/evaluate
+
+# Resource management
+POST   /authz/v1/resources
+GET    /authz/v1/resources/{resourceId}
+PUT    /authz/v1/resources/{resourceId}/owner
+```
+
+#### 2.2.2 Authorization Engine (Core)
+**Responsibilities**:
+- Evaluate authorization decisions
+- Orchestrate multiple authorization models
+- Apply policy rules
+- Cache decisions for performance
+
+**Key Interfaces**:
+```java
+public interface AuthorizationEngine {
+    AuthzDecision check(AuthzRequest request);
+    List<AuthzDecision> batchCheck(List<AuthzRequest> requests);
+    List<Permission> queryPermissions(String userId, String resourceType);
+    boolean hasPermission(String userId, String action, String resource);
+}
+
+public class AuthzRequest {
+    String userId;                  // Subject
+    String action;                  // Action (read, write, delete, etc.)
+    String resource;                // Resource identifier
+    String resourceType;            // Type of resource
+    Map<String, Object> context;    // Request context (IP, time, etc.)
+    Map<String, Object> attributes; // Additional attributes
+}
+
+public class AuthzDecision {
+    boolean allowed;
+    String reason;                  // Why allowed/denied
+    List<String> appliedPolicies;   // Policies that were evaluated
+    Map<String, Object> obligations; // Actions that must be taken
+    long evaluationTimeMs;
+    String decisionId;              // For audit trail
+}
+
+public interface AuthorizationModel {
+    String getModelName();
+    AuthzDecision evaluate(AuthzRequest request);
+    boolean supports(AuthzRequest request);
+}
+```
+
+#### 2.2.3 RBAC Engine
+**Responsibilities**:
+- Role-based access control
+- Role hierarchy management
+- Role assignment and inheritance
+- Permission to role mapping
+
+**Data Model**:
+```java
+public class Role {
+    String roleId;
+    String name;
+    String description;
+    String tenantId;
+    List<String> permissions;
+    List<String> parentRoles;       // For role hierarchy
+    Map<String, Object> metadata;
+    Timestamp createdAt;
+    Timestamp updatedAt;
+}
+
+public class RoleAssignment {
+    String assignmentId;
+    String userId;
+    String roleId;
+    String scope;                   // Global, tenant, resource
+    String scopeId;                 // Tenant ID or resource ID
+    Timestamp expiresAt;
+    Timestamp assignedAt;
+}
+
+public class Permission {
+    String permissionId;
+    String name;
+    String action;
+    String resourceType;
+    Map<String, Object> constraints; // Additional constraints
+}
+```
+
+**Database Schema** (DynamoDB / Key-Value Store):
+```javascript
+// Roles Table
+{
+  TableName: "Roles",
+  KeySchema: [
+    { AttributeName: "role_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "role_id", AttributeType: "S" },
+    { AttributeName: "tenant_id", AttributeType: "S" },
+    { AttributeName: "name", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "TenantIndex",
+      KeySchema: [
+        { AttributeName: "tenant_id", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "TenantNameIndex",
+      KeySchema: [
+        { AttributeName: "tenant_id", KeyType: "HASH" },
+        { AttributeName: "name", KeyType: "RANGE" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "role_id": "role-123",
+  "name": "editor",
+  "description": "Can edit documents",
+  "tenant_id": "tenant-456",
+  "permissions": [
+    "document:read",
+    "document:write",
+    "document:update"
+  ],
+  "parent_roles": ["role-789"],  // For role hierarchy
+  "metadata": {
+    "department": "engineering",
+    "level": 2
+  },
+  "created_at": 1704067200000,
+  "updated_at": 1704067200000
+}
+
+// Role Assignments Table
+{
+  TableName: "RoleAssignments",
+  KeySchema: [
+    { AttributeName: "assignment_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "assignment_id", AttributeType: "S" },
+    { AttributeName: "user_id", AttributeType: "S" },
+    { AttributeName: "role_id", AttributeType: "S" },
+    { AttributeName: "scope", AttributeType: "S" },
+    { AttributeName: "scope_id", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "UserIndex",
+      KeySchema: [
+        { AttributeName: "user_id", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "RoleIndex",
+      KeySchema: [
+        { AttributeName: "role_id", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "ScopeIndex",
+      KeySchema: [
+        { AttributeName: "scope", KeyType: "HASH" },
+        { AttributeName: "scope_id", KeyType: "RANGE" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "assignment_id": "assign-123",
+  "user_id": "user-456",
+  "role_id": "role-789",
+  "scope": "tenant",  // global, tenant, resource
+  "scope_id": "tenant-456",
+  "expires_at": null,
+  "assigned_at": 1704067200000,
+  "assigned_by": "admin-user-123",
+  "metadata": {
+    "reason": "New team member",
+    "ticket_id": "TICKET-456"
+  }
+}
+
+// Permissions Table
+{
+  TableName: "Permissions",
+  KeySchema: [
+    { AttributeName: "permission_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "permission_id", AttributeType: "S" },
+    { AttributeName: "name", AttributeType: "S" },
+    { AttributeName: "resource_type", AttributeType: "S" },
+    { AttributeName: "action", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "NameIndex",
+      KeySchema: [
+        { AttributeName: "name", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "ResourceActionIndex",
+      KeySchema: [
+        { AttributeName: "resource_type", KeyType: "HASH" },
+        { AttributeName: "action", KeyType: "RANGE" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "permission_id": "perm-123",
+  "name": "document:read",
+  "action": "read",
+  "resource_type": "document",
+  "description": "Read documents",
+  "constraints": {
+    "time_based": false,
+    "ip_restricted": false
+  },
+  "created_at": 1704067200000,
+  "updated_at": 1704067200000
+}
+```
+
+**RBAC Evaluation Logic**:
+```java
+public class RbacEngine implements AuthorizationModel {
+    
+    @Override
+    public AuthzDecision evaluate(AuthzRequest request) {
+        // 1. Get user's roles (including inherited)
+        List<Role> userRoles = getRolesForUser(
+            request.userId, 
+            request.resource
+        );
+        
+        // 2. Collect all permissions from roles
+        Set<Permission> permissions = new HashSet<>();
+        for (Role role : userRoles) {
+            permissions.addAll(expandPermissions(role));
+        }
+        
+        // 3. Check if any permission matches
+        String requiredPermission = String.format(
+            "%s:%s",
+            request.resourceType,
+            request.action
+        );
+        
+        boolean allowed = permissions.stream()
+            .anyMatch(p -> matchesPermission(p, requiredPermission));
+            
+        return AuthzDecision.builder()
+            .allowed(allowed)
+            .reason(allowed ? "Permission granted via RBAC" : "No matching permission")
+            .appliedPolicies(List.of("RBAC"))
+            .build();
+    }
+    
+    private List<Role> getRolesForUser(String userId, String resource) {
+        // Get direct role assignments
+        List<RoleAssignment> assignments = 
+            roleAssignmentRepo.findByUserId(userId);
+        
+        // Filter by scope
+        assignments = filterByScope(assignments, resource);
+        
+        // Expand role hierarchy
+        List<Role> roles = new ArrayList<>();
+        for (RoleAssignment assignment : assignments) {
+            Role role = roleRepo.findById(assignment.roleId);
+            roles.add(role);
+            roles.addAll(getParentRoles(role));
+        }
+        
+        return roles;
+    }
+}
+```
+
+#### 2.2.4 ABAC Engine
+**Responsibilities**:
+- Attribute-based access control
+- Evaluate user, resource, and environment attributes
+- Dynamic policy evaluation
+- Context-aware decisions
+
+**Data Model**:
+```java
+public class AbacPolicy {
+    String policyId;
+    String name;
+    String effect;                  // ALLOW or DENY
+    PolicyCondition condition;
+    List<PolicyRule> rules;
+    int priority;
+    boolean enabled;
+}
+
+public class PolicyCondition {
+    String operator;                // AND, OR, NOT
+    List<AttributeCondition> conditions;
+}
+
+public class AttributeCondition {
+    String attribute;               // user.department, resource.classification
+    String operator;                // EQUALS, IN, GREATER_THAN, etc.
+    Object value;
+}
+
+public class PolicyRule {
+    List<String> subjects;          // User attributes
+    List<String> actions;
+    List<String> resources;         // Resource attributes
+    PolicyCondition condition;
+}
+```
+
+**Policy Example (JSON)**:
+```json
+{
+  "policyId": "p-001",
+  "name": "Allow employees to read public documents",
+  "effect": "ALLOW",
+  "rules": [{
+    "subjects": ["user.type == 'employee'"],
+    "actions": ["read"],
+    "resources": ["resource.classification == 'public'"],
+    "condition": {
+      "operator": "AND",
+      "conditions": [
+        {
+          "attribute": "user.department",
+          "operator": "IN",
+          "value": ["engineering", "product", "sales"]
+        },
+        {
+          "attribute": "context.time",
+          "operator": "BETWEEN",
+          "value": ["09:00", "18:00"]
+        }
+      ]
+    }
+  }],
+  "priority": 100,
+  "enabled": true
+}
+```
+
+**ABAC Evaluation**:
+```java
+public class AbacEngine implements AuthorizationModel {
+    
+    @Override
+    public AuthzDecision evaluate(AuthzRequest request) {
+        // 1. Get user attributes
+        Map<String, Object> userAttrs = getUserAttributes(request.userId);
+        
+        // 2. Get resource attributes
+        Map<String, Object> resourceAttrs = 
+            getResourceAttributes(request.resource);
+        
+        // 3. Build evaluation context
+        EvaluationContext context = EvaluationContext.builder()
+            .user(userAttrs)
+            .resource(resourceAttrs)
+            .action(request.action)
+            .environment(request.context)
+            .build();
+        
+        // 4. Get applicable policies
+        List<AbacPolicy> policies = getPoliciesForResourceType(
+            request.resourceType
+        );
+        
+        // 5. Evaluate policies by priority
+        policies.sort(Comparator.comparing(AbacPolicy::getPriority).reversed());
+        
+        for (AbacPolicy policy : policies) {
+            if (evaluatePolicy(policy, context)) {
+                return AuthzDecision.builder()
+                    .allowed(policy.effect.equals("ALLOW"))
+                    .reason("Matched policy: " + policy.name)
+                    .appliedPolicies(List.of(policy.policyId))
+                    .build();
+            }
+        }
+        
+        // Default deny
+        return AuthzDecision.builder()
+            .allowed(false)
+            .reason("No matching policy")
+            .build();
+    }
+}
+```
+
+**Database Schema** (DynamoDB / Key-Value Store):
+```javascript
+// ABAC Policies Table
+{
+  TableName: "AbacPolicies",
+  KeySchema: [
+    { AttributeName: "policy_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "policy_id", AttributeType: "S" },
+    { AttributeName: "tenant_id", AttributeType: "S" },
+    { AttributeName: "priority", AttributeType: "N" },
+    { AttributeName: "enabled", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "TenantPriorityIndex",
+      KeySchema: [
+        { AttributeName: "tenant_id", KeyType: "HASH" },
+        { AttributeName: "priority", KeyType: "RANGE" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "EnabledIndex",
+      KeySchema: [
+        { AttributeName: "enabled", KeyType: "HASH" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "policy_id": "policy-123",
+  "name": "Allow employees to read public documents",
+  "description": "Standard employee access policy",
+  "effect": "ALLOW",  // ALLOW or DENY
+  "rules": [
+    {
+      "subjects": ["user.type == 'employee'"],
+      "actions": ["read"],
+      "resources": ["resource.classification == 'public'"],
+      "condition": {
+        "operator": "AND",
+        "conditions": [
+          {
+            "attribute": "user.department",
+            "operator": "IN",
+            "value": ["engineering", "product", "sales"]
+          },
+          {
+            "attribute": "context.time",
+            "operator": "BETWEEN",
+            "value": ["09:00", "18:00"]
+          }
+        ]
+      }
+    }
+  ],
+  "priority": 100,
+  "enabled": "true",
+  "tenant_id": "tenant-456",
+  "created_at": 1704067200000,
+  "updated_at": 1704067200000
+}
+
+// Attribute Mappings Table
+{
+  TableName: "AttributeMappings",
+  KeySchema: [
+    { AttributeName: "mapping_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "mapping_id", AttributeType: "S" },
+    { AttributeName: "entity_type", AttributeType: "S" },
+    { AttributeName: "attribute_name", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "EntityAttributeIndex",
+      KeySchema: [
+        { AttributeName: "entity_type", KeyType: "HASH" },
+        { AttributeName: "attribute_name", KeyType: "RANGE" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "mapping_id": "map-123",
+  "entity_type": "user",  // user, resource, environment
+  "attribute_name": "department",
+  "attribute_type": "string",  // string, number, boolean, array
+  "source": "user_profile",  // Where to fetch from
+  "source_path": "$.metadata.department",  // JSONPath
+  "cache_ttl": 300,  // Cache duration in seconds
+  "created_at": 1704067200000
+}
+```
+
+#### 2.2.5 ReBAC Engine (Relationship-Based)
+**Responsibilities**:
+- Relationship-based access control
+- Graph-based permission evaluation
+- Organization hierarchy traversal
+- Team and group membership
+
+**Data Model**:
+```java
+public class Relationship {
+    String relationshipId;
+    String subjectType;             // user, group, team
+    String subjectId;
+    String relation;                // owner, member, viewer, parent
+    String objectType;              // document, folder, project
+    String objectId;
+    Timestamp createdAt;
+}
+
+public class RelationshipTuple {
+    String subject;                 // user:alice
+    String relation;                // member
+    String object;                  // team:engineering
+}
+```
+
+**Relationship Schema (DynamoDB / Key-Value Store)**:
+```javascript
+// Relationships Table (Zanzibar-style)
+{
+  TableName: "Relationships",
+  KeySchema: [
+    { AttributeName: "relationship_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "relationship_id", AttributeType: "S" },
+    { AttributeName: "namespace", AttributeType: "S" },
+    { AttributeName: "object_key", AttributeType: "S" },  // object_type:object_id
+    { AttributeName: "subject_key", AttributeType: "S" },  // subject_type:subject_id
+    { AttributeName: "relation", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "ObjectIndex",
+      KeySchema: [
+        { AttributeName: "namespace", KeyType: "HASH" },
+        { AttributeName: "object_key", KeyType: "RANGE" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "SubjectIndex",
+      KeySchema: [
+        { AttributeName: "namespace", KeyType: "HASH" },
+        { AttributeName: "subject_key", KeyType: "RANGE" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "RelationIndex",
+      KeySchema: [
+        { AttributeName: "relation", KeyType: "HASH" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "relationship_id": "rel-123",
+  "namespace": "document",
+  "object_type": "document",
+  "object_id": "doc-456",
+  "object_key": "document:doc-456",  // Composite key for indexing
+  "relation": "editor",
+  "subject_type": "user",
+  "subject_id": "user-789",
+  "subject_key": "user:user-789",  // Composite key for indexing
+  "subject_relation": null,  // For indirect relationships (e.g., "member")
+  "created_at": 1704067200000,
+  "expires_at": null,
+  "metadata": {
+    "granted_by": "admin-user-123",
+    "reason": "Team collaboration"
+  }
+}
+
+// Relationship Graph Cache Table (for fast lookups)
+{
+  TableName: "RelationshipGraphCache",
+  KeySchema: [
+    { AttributeName: "cache_key", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "cache_key", AttributeType: "S" },
+    { AttributeName: "expires_at", AttributeType: "N" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "ExpirationIndex",
+      KeySchema: [
+        { AttributeName: "expires_at", KeyType: "HASH" }
+      ]
+    }
+  ],
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure
+{
+  "cache_key": "check:user-789:editor:document:doc-456",
+  "result": true,
+  "computed_at": 1704067200000,
+  "expires_at": 1704067500000,
+  "ttl": 1704067500  // Unix timestamp for TTL
+}
+```
+
+**Relationship Definition (Config)**:
+```yaml
+namespaces:
+  document:
+    relations:
+      owner:
+        this: {}
+      editor:
+        union:
+          - this
+          - computed_userset:
+              object: parent
+              relation: editor
+      viewer:
+        union:
+          - this
+          - computed_userset:
+              relation: editor
+          - tuple_to_userset:
+              tupleset:
+                relation: parent
+              computed_userset:
+                object: $TUPLE_USERSET_OBJECT
+                relation: viewer
+                
+  folder:
+    relations:
+      owner:
+        this: {}
+      editor:
+        union:
+          - this
+          - computed_userset:
+              object: parent
+              relation: editor
+      viewer:
+        union:
+          - this
+          - computed_userset:
+              relation: editor
+```
+
+**ReBAC Evaluation**:
+```java
+public class RebacEngine implements AuthorizationModel {
+    
+    @Override
+    public AuthzDecision evaluate(AuthzRequest request) {
+        // Check if user has required relationship to resource
+        boolean hasRelationship = checkRelationship(
+            "user:" + request.userId,
+            request.action,  // Relation (e.g., "viewer", "editor")
+            request.resourceType + ":" + request.resource
+        );
+        
+        return AuthzDecision.builder()
+            .allowed(hasRelationship)
+            .reason(hasRelationship ? 
+                "User has required relationship" : 
+                "No relationship found")
+            .appliedPolicies(List.of("ReBAC"))
+            .build();
+    }
+    
+    private boolean checkRelationship(
+        String subject, 
+        String relation, 
+        String object
+    ) {
+        // Direct relationship check
+        if (hasDirectRelationship(subject, relation, object)) {
+            return true;
+        }
+        
+        // Computed relationship check (traverse graph)
+        RelationshipDefinition def = getRelationshipDefinition(
+            object.split(":")[0], 
+            relation
+        );
+        
+        return evaluateRelationshipDefinition(def, subject, object);
+    }
+}
+```
+
+#### 2.2.6 Policy Decision Point (PDP)
+**Responsibilities**:
+- Evaluate policies using policy engines
+- Support multiple policy languages
+- Cache policy decisions
+- Provide policy testing
+
+**OPA Integration**:
+```java
+public class OpaEngine implements PolicyEngine {
+    private final OpaClient opaClient;
+    
+    @Override
+    public AuthzDecision evaluate(AuthzRequest request, String policyPath) {
+        // Build OPA input
+        Map<String, Object> input = Map.of(
+            "user", getUserContext(request.userId),
+            "action", request.action,
+            "resource", getResourceContext(request.resource),
+            "context", request.context
+        );
+        
+        // Evaluate policy
+        OpaResult result = opaClient.evaluate(policyPath, input);
+        
+        return AuthzDecision.builder()
+            .allowed(result.getAllow())
+            .reason(result.getReason())
+            .appliedPolicies(List.of(policyPath))
+            .build();
+    }
+}
+```
+
+**OPA Policy Example (Rego)**:
+```rego
+package authz.document
+
+import future.keywords.if
+import future.keywords.in
+
+default allow = false
+
+# Allow document owners full access
+allow if {
+    input.user.id == input.resource.owner_id
+}
+
+# Allow editors to read and write
+allow if {
+    input.action in ["read", "write"]
+    "editor" in input.user.roles
+    input.resource.department == input.user.department
+}
+
+# Allow viewers to read
+allow if {
+    input.action == "read"
+    "viewer" in input.user.roles
+    input.resource.classification == "public"
+}
+
+# Deny access outside business hours for sensitive documents
+allow = false if {
+    input.resource.classification == "confidential"
+    not is_business_hours(input.context.time)
+}
+
+is_business_hours(time) if {
+    hour := time.hour
+    hour >= 9
+    hour < 18
+}
+```
+
+**Cedar Integration**:
+```java
+public class CedarEngine implements PolicyEngine {
+    private final CedarAuthorizationEngine cedar;
+    
+    @Override
+    public AuthzDecision evaluate(AuthzRequest request, String policySet) {
+        // Build Cedar entities
+        Entity principal = Entity.builder()
+            .type("User")
+            .id(request.userId)
+            .build();
+            
+        Entity action = Entity.builder()
+            .type("Action")
+            .id(request.action)
+            .build();
+            
+        Entity resource = Entity.builder()
+            .type(request.resourceType)
+            .id(request.resource)
+            .build();
+        
+        // Evaluate
+        AuthorizationResponse response = cedar.isAuthorized(
+            principal,
+            action,
+            resource,
+            policySet
+        );
+        
+        return AuthzDecision.builder()
+            .allowed(response.isAllowed())
+            .reason(response.getDiagnostics())
+            .appliedPolicies(response.getAppliedPolicies())
+            .build();
+    }
+}
+```
+
+**Cedar Policy Example**:
+```cedar
+// Allow document owners all actions
+permit(
+    principal,
+    action,
+    resource
+)
+when {
+    resource.owner == principal.id
+};
+
+// Allow editors to edit documents in their department
+permit(
+    principal,
+    action == Action::"edit",
+    resource
+)
+when {
+    principal.role == "editor" &&
+    resource.department == principal.department
+};
+
+// Deny access to confidential documents outside business hours
+forbid(
+    principal,
+    action,
+    resource
+)
+when {
+    resource.classification == "confidential" &&
+    (context.time.hour < 9 || context.time.hour >= 18)
+};
+```
+
+#### 2.2.7 Permission Manager
+**Responsibilities**:
+- Grant and revoke permissions
+- Query user permissions
+- Manage resource ownership
+- Handle permission delegation
+
+**API Implementation**:
+```java
+public class PermissionManager {
+    
+    public void grantPermission(PermissionGrant grant) {
+        // Validate grant request
+        validateGrant(grant);
+        
+        // Store permission
+        permissionRepo.save(grant);
+        
+        // Invalidate cache
+        cacheInvalidator.invalidateUser(grant.userId);
+        
+        // Audit log
+        auditLogger.log(AuditEvent.builder()
+            .type("PERMISSION_GRANTED")
+            .userId(grant.userId)
+            .permission(grant.permission)
+            .resource(grant.resource)
+            .grantedBy(grant.grantedBy)
+            .build());
+    }
+    
+    public void revokePermission(String userId, String permission, String resource) {
+        permissionRepo.delete(userId, permission, resource);
+        cacheInvalidator.invalidateUser(userId);
+        
+        auditLogger.log(AuditEvent.builder()
+            .type("PERMISSION_REVOKED")
+            .userId(userId)
+            .permission(permission)
+            .resource(resource)
+            .build());
+    }
+    
+    public List<Permission> queryPermissions(String userId, String resourceType) {
+        // Check cache first
+        String cacheKey = String.format("permissions:%s:%s", userId, resourceType);
+        List<Permission> cached = cache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+        
+        // Query from database
+        List<Permission> permissions = permissionRepo.findByUserAndResourceType(
+            userId, 
+            resourceType
+        );
+        
+        // Include inherited permissions from roles
+        permissions.addAll(getInheritedPermissions(userId, resourceType));
+        
+        // Cache result
+        cache.set(cacheKey, permissions, Duration.ofMinutes(5));
+        
+        return permissions;
+    }
+}
+```
+
+**Permission Storage** (DynamoDB / Key-Value Store):
+```javascript
+// User Permissions Table
+{
+  TableName: "UserPermissions",
+  KeySchema: [
+    { AttributeName: "permission_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "permission_id", AttributeType: "S" },
+    { AttributeName: "user_id", AttributeType: "S" },
+    { AttributeName: "resource_key", AttributeType: "S" },  // resource_type:resource_id
+    { AttributeName: "expires_at", AttributeType: "N" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "UserIndex",
+      KeySchema: [
+        { AttributeName: "user_id", KeyType: "HASH" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "ResourceIndex",
+      KeySchema: [
+        { AttributeName: "resource_key", KeyType: "HASH" }
+      ]
+    },
+    {
+      IndexName: "ExpirationIndex",
+      KeySchema: [
+        { AttributeName: "expires_at", KeyType: "HASH" }
+      ]
+    }
+  ],
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure
+{
+  "permission_id": "perm-123",
+  "user_id": "user-456",
+  "permission": "document:read",
+  "resource_type": "document",
+  "resource_id": "doc-789",
+  "resource_key": "document:doc-789",  // Composite for indexing
+  "scope": "resource",  // global, tenant, resource
+  "granted_by": "admin-user-123",
+  "granted_at": 1704067200000,
+  "expires_at": null,
+  "ttl": null,  // Unix timestamp for auto-expiration
+  "metadata": {
+    "reason": "Direct permission grant",
+    "ticket_id": "TICKET-456"
+  }
+}
+```
+
+**Audit Event Schema** (DynamoDB / Key-Value Store):
+```javascript
+// Authorization Audit Log Table
+{
+  TableName: "AuthzAuditLog",
+  KeySchema: [
+    { AttributeName: "event_id", KeyType: "HASH" }  // Partition key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "event_id", AttributeType: "S" },
+    { AttributeName: "user_id", AttributeType: "S" },
+    { AttributeName: "timestamp", AttributeType: "N" },
+    { AttributeName: "resource", AttributeType: "S" },
+    { AttributeName: "decision", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "UserTimeIndex",
+      KeySchema: [
+        { AttributeName: "user_id", KeyType: "HASH" },
+        { AttributeName: "timestamp", KeyType: "RANGE" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "ResourceTimeIndex",
+      KeySchema: [
+        { AttributeName: "resource", KeyType: "HASH" },
+        { AttributeName: "timestamp", KeyType: "RANGE" }
+      ]
+    },
+    {
+      IndexName: "DecisionTimeIndex",
+      KeySchema: [
+        { AttributeName: "decision", KeyType: "HASH" },
+        { AttributeName: "timestamp", KeyType: "RANGE" }
+      ]
+    }
+  ],
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure
+{
+  "event_id": "evt-123",
+  "timestamp": 1704067200000,
+  "decision_id": "dec-456",
+  "user_id": "user-789",
+  "action": "read",
+  "resource": "document:doc-abc",
+  "resource_type": "document",
+  "decision": "ALLOW",  // ALLOW, DENY
+  "reason": "Permission granted via RBAC",
+  "applied_policies": ["policy-1", "policy-2"],
+  "context": {
+    "ip_address": "192.168.1.1",
+    "user_agent": "Mozilla/5.0...",
+    "location": "US-CA"
+  },
+  "evaluation_time_ms": 8,
+  "created_at": 1704067200000,
+  "ttl": 1735689600  // 1 year retention
+}
+```
+
+#### 2.2.8 Decision Cache
+**Responsibilities**:
+- Cache authorization decisions
+- Invalidate on policy changes
+- Provide cache statistics
+- TTL-based expiration
+
+**Cache Schema** (Redis):
+```
+# Authorization decision cache
+authz:decision:{userId}:{action}:{resource} -> {
+    allowed: boolean,
+    reason: string,
+    cachedAt: timestamp,
+    ttl: int
+}
+TTL: 300 seconds (5 minutes)
+
+# User permission cache
+authz:permissions:{userId}:{resourceType} -> [
+    {permission: string, scope: string},
+    ...
+]
+TTL: 300 seconds
+
+# Policy evaluation cache
+authz:policy:{policyId}:{contextHash} -> {
+    result: boolean,
+    evaluation: object
+}
+TTL: 60 seconds
+
+# Invalidation tracking
+authz:invalidate:{userId} -> timestamp
+authz:invalidate:policy:{policyId} -> timestamp
+```
+
+**Cache Implementation**:
+```java
+public class DecisionCache {
+    private final RedisTemplate<String, String> redis;
+    private static final Duration DEFAULT_TTL = Duration.ofMinutes(5);
+    
+    public Optional<AuthzDecision> get(AuthzRequest request) {
+        String key = buildCacheKey(request);
+        String cached = redis.opsForValue().get(key);
+        
+        if (cached == null) {
+            return Optional.empty();
+        }
+        
+        // Check if invalidated
+        if (isInvalidated(request.userId)) {
+            redis.delete(key);
+            return Optional.empty();
+        }
+        
+        return Optional.of(deserialize(cached));
+    }
+    
+    public void put(AuthzRequest request, AuthzDecision decision) {
+        String key = buildCacheKey(request);
+        String value = serialize(decision);
+        redis.opsForValue().set(key, value, DEFAULT_TTL);
+    }
+    
+    public void invalidateUser(String userId) {
+        // Mark user for invalidation
+        String invalidateKey = "authz:invalidate:" + userId;
+        redis.opsForValue().set(
+            invalidateKey, 
+            String.valueOf(System.currentTimeMillis()),
+            Duration.ofMinutes(10)
+        );
+        
+        // Delete user-specific keys (async)
+        Pattern pattern = Pattern.compile("authz:decision:" + userId + ":.*");
+        redis.keys(pattern).forEach(redis::delete);
+    }
+    
+    public void invalidatePolicy(String policyId) {
+        // Invalidate all decisions that might have used this policy
+        String invalidateKey = "authz:invalidate:policy:" + policyId;
+        redis.opsForValue().set(
+            invalidateKey,
+            String.valueOf(System.currentTimeMillis()),
+            Duration.ofMinutes(10)
+        );
+    }
+}
+```
+
+## 3. Data Flow
+
+### 3.1 Authorization Check Flow
+```
+1. Request arrives at Authorization Service
+   ↓
+2. Check Decision Cache
+   ↓ (cache miss)
+3. Extract user context and attributes
+   ↓
+4. Load applicable policies
+   ↓
+5. Evaluate using appropriate engine(s)
+   - RBAC: Check role assignments
+   - ABAC: Evaluate policy conditions
+   - ReBAC: Traverse relationship graph
+   - PDP: Evaluate policy language (OPA/Cedar)
+   ↓
+6. Combine results (if multiple engines)
+   ↓
+7. Cache decision
+   ↓
+8. Audit log the decision
+   ↓
+9. Return decision to caller
+```
+
+### 3.2 Policy Update Flow
+```
+1. Policy update request received
+   ↓
+2. Validate policy syntax
+   ↓
+3. Store new policy version
+   ↓
+4. Invalidate affected decision cache entries
+   ↓
+5. Notify distributed cache (pub/sub)
+   ↓
+6. Audit log the change
+   ↓
+7. Return success
+```
+
+## 4. Integration Points
+
+### 4.1 API Gateway Integration
+```java
+public class AuthorizationFilter implements GatewayFilter {
+    private final AuthorizationEngine authzEngine;
+    
+    @Override
+    public void filter(Request request, Response response) {
+        // Extract authenticated user
+        String userId = request.getAttribute("auth.userId");
+        
+        // Build authorization request
+        AuthzRequest authzRequest = AuthzRequest.builder()
+            .userId(userId)
+            .action(mapHttpMethodToAction(request.getMethod()))
+            .resource(extractResourceId(request.getPath()))
+            .resourceType(extractResourceType(request.getPath()))
+            .context(buildContext(request))
+            .build();
+        
+        // Check authorization
+        AuthzDecision decision = authzEngine.check(authzRequest);
+        
+        if (!decision.allowed) {
+            response.setStatus(403);
+            response.setBody(Map.of(
+                "error", "Forbidden",
+                "reason", decision.reason,
+                "decisionId", decision.decisionId
+            ));
+            return;
+        }
+        
+        // Inject authorization context for downstream services
+        request.setAttribute("authz.decision", decision);
+        request.addHeader("X-Authz-Decision-Id", decision.decisionId);
+    }
+}
+```
+
+### 4.2 Service Mesh Integration
+```yaml
+# Envoy external authorization filter
+external_authorization:
+  grpc_service:
+    envoy_grpc:
+      cluster_name: authz_service
+    timeout: 0.2s
+  failure_mode_allow: false
+  
+  # Pass additional context
+  with_request_body:
+    max_request_bytes: 8192
+    allow_partial_message: true
+```
+
+**gRPC Service**:
+```protobuf
+service AuthorizationService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+  rpc BatchCheck(BatchCheckRequest) returns (BatchCheckResponse);
+}
+
+message CheckRequest {
+  string user_id = 1;
+  string action = 2;
+  string resource = 3;
+  string resource_type = 4;
+  map<string, string> context = 5;
+  map<string, google.protobuf.Value> attributes = 6;
+}
+
+message CheckResponse {
+  bool allowed = 1;
+  string reason = 2;
+  repeated string applied_policies = 3;
+  string decision_id = 4;
+  map<string, google.protobuf.Value> obligations = 5;
+}
+```
+
+## 5. Performance Considerations
+
+### 5.1 Caching Strategy
+```
+Level 1: In-Memory Cache (Local)
+- Cache hot authorization decisions
+- TTL: 30 seconds
+- Invalidation: Pub/Sub notifications
+
+Level 2: Distributed Cache (Redis)
+- Cache user permissions
+- Cache policy evaluation results
+- TTL: 5 minutes
+- Invalidation: Explicit on policy changes
+
+Level 3: Database Query Optimization
+- Materialized views for relationships
+- Index on common query patterns
+- Connection pooling
+```
+
+### 5.2 Performance Targets
+- Authorization check: < 10ms p95
+- Batch check (10 items): < 50ms p95
+- Cache hit rate: > 95%
+- Throughput: 100,000+ checks/second per instance
+
+### 5.3 Optimization Techniques
+```java
+public class OptimizedAuthzEngine {
+    
+    // Batch permission loading
+    public Map<String, List<Permission>> batchLoadPermissions(
+        List<String> userIds,
+        String resourceType
+    ) {
+        // Single database query for all users
+        return permissionRepo.findByUsersAndResourceType(
+            userIds, 
+            resourceType
+        );
+    }
+    
+    // Parallel policy evaluation
+    public AuthzDecision evaluateParallel(AuthzRequest request) {
+        List<CompletableFuture<AuthzDecision>> futures = 
+            authzModels.stream()
+                .map(model -> CompletableFuture.supplyAsync(
+                    () -> model.evaluate(request),
+                    executorService
+                ))
+                .collect(Collectors.toList());
+        
+        // Combine results (first ALLOW wins)
+        return futures.stream()
+            .map(CompletableFuture::join)
+            .filter(AuthzDecision::isAllowed)
+            .findFirst()
+            .orElse(AuthzDecision.deny());
+    }
+    
+    // Smart cache warming
+    public void warmCache(String userId) {
+        // Pre-load commonly accessed permissions
+        List<String> commonResources = getCommonResourceTypes();
+        commonResources.forEach(resourceType -> 
+            queryPermissions(userId, resourceType)
+        );
+    }
+}
+```
+
+## 6. Security Measures
+
+### 6.1 Policy Security
+```java
+public class PolicyValidator {
+    
+    public ValidationResult validate(Policy policy) {
+        List<ValidationError> errors = new ArrayList<>();
+        
+        // Check for overly broad permissions
+        if (isOverlyBroad(policy)) {
+            errors.add(new ValidationError(
+                "Policy grants excessive permissions",
+                Severity.HIGH
+            ));
+        }
+        
+        // Check for privilege escalation
+        if (allowsPrivilegeEscalation(policy)) {
+            errors.add(new ValidationError(
+                "Policy may allow privilege escalation",
+                Severity.CRITICAL
+            ));
+        }
+        
+        // Check for conflicts
+        List<Policy> conflicting = findConflictingPolicies(policy);
+        if (!conflicting.isEmpty()) {
+            errors.add(new ValidationError(
+                "Policy conflicts with existing policies: " + conflicting,
+                Severity.MEDIUM
+            ));
+        }
+        
+        return new ValidationResult(errors.isEmpty(), errors);
+    }
+}
+```
+
+### 6.2 Audit Trail
+```java
+public class AuthzAuditLogger {
+    
+    public void logDecision(AuthzRequest request, AuthzDecision decision) {
+        AuthzAuditEvent event = AuthzAuditEvent.builder()
+            .eventId(UUID.randomUUID().toString())
+            .timestamp(Instant.now())
+            .decisionId(decision.decisionId)
+            .userId(request.userId)
+            .action(request.action)
+            .resource(request.resource)
+            .resourceType(request.resourceType)
+            .decision(decision.allowed ? "ALLOW" : "DENY")
+            .reason(decision.reason)
+            .appliedPolicies(decision.appliedPolicies)
+            .context(request.context)
+            .evaluationTimeMs(decision.evaluationTimeMs)
+            .build();
+        
+        // Send to Kafka for immutable storage
+        kafkaProducer.send("authz.audit.decisions", event);
+        
+        // Also send to SIEM if denied
+        if (!decision.allowed) {
+            siemIntegration.sendSecurityEvent(event);
+        }
+    }
+}
+```
+
+**Audit Event Schema**:
+```sql
+CREATE TABLE authz_audit_log (
+    event_id UUID PRIMARY KEY,
+    timestamp TIMESTAMP NOT NULL,
+    decision_id UUID NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    resource VARCHAR(500) NOT NULL,
+    resource_type VARCHAR(100) NOT NULL,
+    decision VARCHAR(10) NOT NULL,  -- ALLOW, DENY
+    reason TEXT,
+    applied_policies TEXT[],
+    context JSONB,
+    evaluation_time_ms INT,
+    created_at TIMESTAMP DEFAULT NOW()
+) PARTITION BY RANGE (timestamp);
+
+-- Create monthly partitions
+CREATE INDEX idx_authz_audit_user ON authz_audit_log(user_id, timestamp DESC);
+CREATE INDEX idx_authz_audit_resource ON authz_audit_log(resource, timestamp DESC);
+CREATE INDEX idx_authz_audit_decision ON authz_audit_log(decision, timestamp DESC);
+```
+
+## 7. Monitoring and Observability
+
+### 7.1 Metrics
+```
+# Authorization metrics
+authz_check_total{model, decision}
+authz_check_duration_seconds{model}
+authz_cache_hit_ratio
+authz_policy_evaluation_total{policy_id}
+authz_permission_query_duration_seconds
+
+# Performance metrics
+authz_decision_cache_size
+authz_permission_cache_size
+authz_policy_load_time_seconds
+
+# Error metrics
+authz_errors_total{type}
+authz_policy_validation_failures_total
+authz_timeout_total
+
+# Audit metrics
+authz_denied_requests_total{reason}
+authz_policy_violations_total{policy_id}
+```
+
+### 7.2 Logging
+```java
+// Structured logging
+log.info("Authorization check",
+    "userId", request.userId,
+    "action", request.action,
+    "resource", request.resource,
+    "decision", decision.allowed,
+    "evaluationTimeMs", decision.evaluationTimeMs,
+    "cacheHit", cacheHit,
+    "appliedPolicies", decision.appliedPolicies
+);
+
+// Denied access logging
+if (!decision.allowed) {
+    log.warn("Access denied",
+        "userId", request.userId,
+        "action", request.action,
+        "resource", request.resource,
+        "reason", decision.reason,
+        "context", request.context
+    );
+}
+```
+
+### 7.3 Alerting
+```yaml
+alerts:
+  - name: HighDenialRate
+    condition: |
+      rate(authz_check_total{decision="deny"}[5m]) > 100
+    severity: warning
+    description: High rate of denied authorization requests
+    
+  - name: AuthzServiceDown
+    condition: |
+      up{job="authz-service"} == 0
+    severity: critical
+    description: Authorization service is down
+    
+  - name: SlowAuthzChecks
+    condition: |
+      histogram_quantile(0.95, authz_check_duration_seconds) > 0.05
+    severity: warning
+    description: 95th percentile authorization latency above 50ms
+    
+  - name: LowCacheHitRate
+    condition: |
+      authz_cache_hit_ratio < 0.8
+    severity: warning
+    description: Authorization cache hit rate below 80%
+```
+
+## 8. Deployment Architecture
+
+### 8.1 High Availability
+```yaml
+deployment:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    maxSurge: 1
+    maxUnavailable: 0
+    
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+      
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: authz-service
+```
+
+### 8.2 Scaling Strategy
+```yaml
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Pods
+      pods:
+        metric:
+          name: authz_check_rate
+        target:
+          type: AverageValue
+          averageValue: "10000"  # 10k checks/sec per pod
+```
+
+## 9. Configuration Management
+
+### 9.1 Service Configuration
+```yaml
+authorization:
+  service:
+    port: 8080
+    grpc_port: 9090
+    thread_pool_size: 200
+    request_timeout: 2s
+    
+  engines:
+    enabled:
+      - rbac
+      - abac
+      - rebac
+      - opa
+    evaluation_mode: first_match  # first_match, all_match, priority
+    
+  cache:
+    enabled: true
+    decision_ttl: 300s
+    permission_ttl: 300s
+    max_size: 100000
+    
+  rbac:
+    role_hierarchy_depth: 5
+    cache_role_assignments: true
+    
+  abac:
+    policy_engine: opa
+    policy_path: /policies/authz
+    
+  rebac:
+    relationship_cache_ttl: 60s
+    max_relationship_depth: 10
+    
+  audit:
+    enabled: true
+    log_all_decisions: false
+    log_denied_decisions: true
+    kafka_topic: authz.audit.decisions
+    
+  performance:
+    batch_size: 100
+    parallel_evaluation: true
+    cache_warming_enabled: true
+```
+
+### 9.2 Policy Configuration
+```yaml
+policies:
+  evaluation_order:
+    - priority_based
+    - explicit_deny
+    - default_deny
+    
+  conflict_resolution: deny_overrides
+  
+  default_policies:
+    - id: default_deny
+      effect: DENY
+      priority: 0
+      conditions: []
+      
+  policy_validation:
+    enabled: true
+    strict_mode: true
+    check_conflicts: true
+```
+
+## 10. Testing Strategy
+
+### 10.1 Unit Testing
+```java
+@Test
+public void testRbacEngine_UserWithRole_ShouldAllow() {
+    // Arrange
+    String userId = "user123";
+    Role role = createRole("editor", List.of("document:read", "document:write"));
+    assignRole(userId, role.roleId);
+    
+    AuthzRequest request = AuthzRequest.builder()
+        .userId(userId)
+        .action("read")
+        .resource("doc456")
+        .resourceType("document")
+        .build();
+    
+    // Act
+    AuthzDecision decision = rbacEngine.evaluate(request);
+    
+    // Assert
+    assertTrue(decision.allowed);
+    assertEquals("Permission granted via RBAC", decision.reason);
+}
+
+@Test
+public void testAbacEngine_OutsideBusinessHours_ShouldDeny() {
+    // Arrange
+    AuthzRequest request = AuthzRequest.builder()
+        .userId("user123")
+        .action("read")
+        .resource("doc456")
+        .resourceType("document")
+        .context(Map.of("time", "2024-01-01T20:00:00Z"))
+        .build();
+    
+    // Act
+    AuthzDecision decision = abacEngine.evaluate(request);
+    
+    // Assert
+    assertFalse(decision.allowed);
+    assertTrue(decision.reason.contains("business hours"));
+}
+```
+
+### 10.2 Integration Testing
+```java
+@Test
+public void testAuthzService_EndToEnd() {
+    // Setup
+    createUser("alice");
+    createRole("viewer", List.of("document:read"));
+    assignRole("alice", "viewer");
+    
+    // Test authorization check
+    CheckResponse response = authzClient.check(
+        CheckRequest.builder()
+            .userId("alice")
+            .action("read")
+            .resource("document:123")
+            .build()
+    );
+    
+    assertTrue(response.allowed);
+    
+    // Verify audit log
+    AuthzAuditEvent event = auditRepo.findByDecisionId(response.decisionId);
+    assertNotNull(event);
+    assertEquals("ALLOW", event.decision);
+}
+```
+
+### 10.3 Policy Testing
+```java
+@Test
+public void testPolicy_DocumentOwner_CanDelete() {
+    // Load policy
+    Policy policy = policyLoader.load("document_access.yaml");
+    
+    // Test case
+    PolicyTestCase testCase = PolicyTestCase.builder()
+        .input(Map.of(
+            "user", Map.of("id", "alice"),
+            "action", "delete",
+            "resource", Map.of(
+                "type", "document",
+                "owner", "alice"
+            )
+        ))
+        .expectedResult(true)
+        .build();
+    
+    // Execute
+    boolean result = policyTester.test(policy, testCase);
+    assertTrue(result);
+}
+```
+
+## 11. Migration and Rollout
+
+### 11.1 Gradual Rollout
+```yaml
+rollout_strategy:
+  phase_1:
+    description: Shadow mode - log decisions but don't enforce
+    duration: 7 days
+    enforcement: shadow
+    
+  phase_2:
+    description: Enforce for test tenants only
+    duration: 14 days
+    tenants: [test-tenant-1, test-tenant-2]
+    enforcement: enforce
+    
+  phase_3:
+    description: Enforce for 10% of production tenants
+    duration: 14 days
+    traffic_percentage: 10
+    enforcement: enforce
+    
+  phase_4:
+    description: Full enforcement
+    enforcement: enforce
+```
+
+### 11.2 Rollback Plan
+```java
+public class AuthzRollbackHandler {
+    
+    public void rollback() {
+        // 1. Switch to previous policy version
+        policyManager.activateVersion(previousVersion);
+        
+        // 2. Clear decision cache
+        decisionCache.clear();
+        
+        // 3. Restart authorization service
+        serviceManager.restart("authz-service");
+        
+        // 4. Monitor for 5 minutes
+        Thread.sleep(Duration.ofMinutes(5));
+        
+        // 5. Verify health
+        if (!healthCheck.isHealthy()) {
+            throw new RollbackException("Service unhealthy after rollback");
+        }
+        
+        // 6. Notify team
+        notificationService.send(
+            "Authorization service rolled back to version " + previousVersion
+        );
+    }
+}
+```
+
+This completes the Authorization Component Design. Would you like me to continue with the next component design (Rate Limiting & Metering)?

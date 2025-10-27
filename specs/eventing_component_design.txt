@@ -1,0 +1,948 @@
+# Eventing Component Design
+
+## 1. Overview
+
+### 1.1 Purpose
+The Eventing component provides event-driven architecture capabilities including event publishing, routing, consumption, and processing. It enables loose coupling between services through asynchronous communication.
+
+### 1.2 Design Principles
+- **At-Least-Once Delivery**: Guarantee event delivery
+- **Event Ordering**: Maintain order within partitions
+- **Scalability**: Handle millions of events per second
+- **Reliability**: Durable event storage with replay capability
+- **Schema Evolution**: Support event schema versioning
+
+## 2. Architecture
+
+### 2.1 High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Event Publishers                            │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Service A│  │ Service B│  │ Service C│  │ Service D│       │
+│  └─────┬────┘  └─────┬────┘  └─────┬────┘  └─────┬────┘       │
+│        │             │              │              │             │
+└────────┼─────────────┼──────────────┼──────────────┼───────────┘
+         │             │              │              │
+         └─────────────┴──────────────┴──────────────┘
+                            │
+┌───────────────────────────┴────────────────────────────────────┐
+│                    Event Gateway                                │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │ Publisher    │  │ Validation   │  │ Schema       │         │
+│  │ API          │  │              │  │ Registry     │         │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘         │
+│         │                  │                  │                  │
+│  ┌──────┴──────────────────┴──────────────────┴───────┐        │
+│  │          Event Router                               │        │
+│  │                                                      │        │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │        │
+│  │  │ Topic    │  │ Content  │  │ Header   │         │        │
+│  │  │ Routing  │  │ Routing  │  │ Routing  │         │        │
+│  │  └──────────┘  └──────────┘  └──────────┘         │        │
+│  └──────────────────────────────────────────────────┘        │
+└───────────────────────────┬────────────────────────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+┌───────▼────────┐  ┌───────▼────────┐  ┌──────▼──────────┐
+│  Event Broker  │  │  Event Store   │  │  Dead Letter    │
+│  (Kafka/Kinesis│  │  (DynamoDB)    │  │  Queue (DLQ)    │
+└────────┬───────┘  └────────────────┘  └─────────────────┘
+         │
+┌────────┴────────────────────────────────────────────────────────┐
+│                    Event Consumers                              │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │ Consumer     │  │ Processor    │  │ Handler      │         │
+│  │ Groups       │  │ Pipeline     │  │ Registry     │         │
+│  └──────────────┘  └──────────────┘  └──────────────┘         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 Component Breakdown
+
+#### 2.2.1 Event Model
+**Responsibilities**:
+- Define event structure
+- Support CloudEvents standard
+- Handle event versioning
+- Manage event metadata
+
+**Event Structure**:
+```java
+public class Event {
+    String eventId;                 // Unique event identifier
+    String eventType;               // Event type (e.g., user.created)
+    String eventVersion;            // Schema version
+    String source;                  // Event source/publisher
+    String subject;                 // Subject of the event
+    Instant timestamp;              // Event occurrence time
+    String dataContentType;         // Content type (application/json)
+    Object data;                    // Event payload
+    Map<String, String> extensions; // Custom attributes
+    String correlationId;           // For event correlation
+    String causationId;             // Event that caused this event
+}
+
+// CloudEvents format
+public class CloudEvent {
+    // Required fields
+    String id;
+    String source;
+    String specversion = "1.0";
+    String type;
+    
+    // Optional fields
+    String datacontenttype;
+    String dataschema;
+    String subject;
+    Instant time;
+    Object data;
+    
+    public static CloudEvent fromEvent(Event event) {
+        return CloudEvent.builder()
+            .id(event.getEventId())
+            .source(event.getSource())
+            .type(event.getEventType())
+            .subject(event.getSubject())
+            .time(event.getTimestamp())
+            .datacontenttype(event.getDataContentType())
+            .data(event.getData())
+            .build();
+    }
+}
+```
+
+#### 2.2.2 Event Publisher
+**Responsibilities**:
+- Publish events to topics
+- Ensure delivery guarantees
+- Handle retries and failures
+- Support batch publishing
+
+**Implementation**:
+```java
+public class EventPublisher {
+    private final EventBroker broker;
+    private final SchemaRegistry schemaRegistry;
+    private final EventValidator validator;
+    
+    public CompletableFuture<PublishResult> publish(Event event) {
+        // 1. Validate event
+        ValidationResult validation = validator.validate(event);
+        if (!validation.isValid()) {
+            return CompletableFuture.failedFuture(
+                new ValidationException(validation.getErrors())
+            );
+        }
+        
+        // 2. Validate against schema
+        Schema schema = schemaRegistry.getSchema(
+            event.getEventType(),
+            event.getEventVersion()
+        );
+        if (!schema.validate(event.getData())) {
+            return CompletableFuture.failedFuture(
+                new SchemaValidationException("Invalid event data")
+            );
+        }
+        
+        // 3. Enrich event with metadata
+        event = enrichEvent(event);
+        
+        // 4. Publish to broker
+        return broker.publish(
+            determineTopic(event),
+            event.getSubject(), // Partition key
+            serialize(event)
+        ).thenApply(result -> PublishResult.builder()
+            .eventId(event.getEventId())
+            .offset(result.getOffset())
+            .partition(result.getPartition())
+            .timestamp(result.getTimestamp())
+            .build()
+        );
+    }
+    
+    public CompletableFuture<List<PublishResult>> publishBatch(
+        List<Event> events
+    ) {
+        List<CompletableFuture<PublishResult>> futures = events.stream()
+            .map(this::publish)
+            .collect(Collectors.toList());
+        
+        return CompletableFuture.allOf(
+            futures.toArray(new CompletableFuture[0])
+        ).thenApply(v -> futures.stream()
+            .map(CompletableFuture::join)
+            .collect(Collectors.toList())
+        );
+    }
+    
+    private Event enrichEvent(Event event) {
+        event.setTimestamp(Instant.now());
+        event.getExtensions().put("publisher.service", getServiceName());
+        event.getExtensions().put("publisher.instance", getInstanceId());
+        event.getExtensions().put("publisher.version", getServiceVersion());
+        return event;
+    }
+}
+```
+
+#### 2.2.3 Event Broker Integration
+**Kafka Implementation**:
+```java
+public class KafkaEventBroker implements EventBroker {
+    private final KafkaProducer<String, byte[]> producer;
+    private final KafkaConsumer<String, byte[]> consumer;
+    
+    @Override
+    public CompletableFuture<PublishResult> publish(
+        String topic,
+        String key,
+        byte[] value
+    ) {
+        ProducerRecord<String, byte[]> record = 
+            new ProducerRecord<>(topic, key, value);
+        
+        CompletableFuture<PublishResult> future = new CompletableFuture<>();
+        
+        producer.send(record, (metadata, exception) -> {
+            if (exception != null) {
+                future.completeExceptionally(exception);
+            } else {
+                future.complete(PublishResult.builder()
+                    .offset(metadata.offset())
+                    .partition(metadata.partition())
+                    .timestamp(metadata.timestamp())
+                    .build()
+                );
+            }
+        });
+        
+        return future;
+    }
+    
+    @Override
+    public void subscribe(String topic, EventHandler handler) {
+        consumer.subscribe(Collections.singletonList(topic));
+        
+        while (true) {
+            ConsumerRecords<String, byte[]> records = 
+                consumer.poll(Duration.ofMillis(100));
+            
+            for (ConsumerRecord<String, byte[]> record : records) {
+                try {
+                    Event event = deserialize(record.value());
+                    handler.handle(event);
+                    
+                    // Commit offset after successful processing
+                    consumer.commitSync(Collections.singletonMap(
+                        new TopicPartition(record.topic(), record.partition()),
+                        new OffsetAndMetadata(record.offset() + 1)
+                    ));
+                } catch (Exception e) {
+                    handleProcessingError(record, e);
+                }
+            }
+        }
+    }
+}
+```
+
+#### 2.2.4 Event Storage (DynamoDB)
+**Schema**:
+```javascript
+// Events Table
+{
+  TableName: "Events",
+  KeySchema: [
+    { AttributeName: "event_id", KeyType: "HASH" }
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "event_id", AttributeType: "S" },
+    { AttributeName: "event_type", AttributeType: "S" },
+    { AttributeName: "timestamp", AttributeType: "N" },
+    { AttributeName: "source", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "TypeTimeIndex",
+      KeySchema: [
+        { AttributeName: "event_type", KeyType: "HASH" },
+        { AttributeName: "timestamp", KeyType: "RANGE" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "SourceTimeIndex",
+      KeySchema: [
+        { AttributeName: "source", KeyType: "HASH" },
+        { AttributeName: "timestamp", KeyType: "RANGE" }
+      ]
+    }
+  ],
+  StreamSpecification: {
+    StreamEnabled: true,
+    StreamViewType: "NEW_AND_OLD_IMAGES"
+  },
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure
+{
+  "event_id": "evt-123",
+  "event_type": "user.created",
+  "event_version": "1.0",
+  "source": "user-service",
+  "subject": "user:456",
+  "timestamp": 1704067200000,
+  "data_content_type": "application/json",
+  "data": {
+    "user_id": "456",
+    "username": "alice",
+    "email": "alice@example.com"
+  },
+  "extensions": {
+    "correlation_id": "corr-789",
+    "causation_id": "evt-122",
+    "publisher_service": "user-service",
+    "publisher_instance": "pod-abc-123"
+  },
+  "ttl": 1709251200  // 60 days retention
+}
+
+// Event Subscriptions Table
+{
+  TableName: "EventSubscriptions",
+  KeySchema: [
+    { AttributeName: "subscription_id", KeyType: "HASH" }
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "subscription_id", AttributeType: "S" },
+    { AttributeName: "event_type", AttributeType: "S" },
+    { AttributeName: "subscriber", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "EventTypeIndex",
+      KeySchema: [
+        { AttributeName: "event_type", KeyType: "HASH" }
+      ],
+      ProjectionType: "ALL"
+    },
+    {
+      IndexName: "SubscriberIndex",
+      KeySchema: [
+        { AttributeName: "subscriber", KeyType: "HASH" }
+      ]
+    }
+  ]
+}
+
+// Document Structure
+{
+  "subscription_id": "sub-123",
+  "event_type": "user.created",
+  "subscriber": "email-service",
+  "endpoint": "https://email-service/events",
+  "filter": {
+    "source": "user-service",
+    "subject_pattern": "user:*"
+  },
+  "delivery": {
+    "method": "webhook",
+    "retry_policy": {
+      "max_attempts": 3,
+      "backoff": "exponential"
+    }
+  },
+  "enabled": true,
+  "created_at": 1704067200000,
+  "updated_at": 1704067200000
+}
+```
+
+#### 2.2.5 Event Router
+**Responsibilities**:
+- Route events to appropriate consumers
+- Apply routing rules
+- Support content-based routing
+- Handle routing failures
+
+**Implementation**:
+```java
+public class EventRouter {
+    private final SubscriptionRegistry subscriptionRegistry;
+    private final EventDispatcher dispatcher;
+    
+    public void route(Event event) {
+        // Get all subscriptions for this event type
+        List<Subscription> subscriptions = 
+            subscriptionRegistry.getSubscriptions(event.getEventType());
+        
+        for (Subscription subscription : subscriptions) {
+            // Apply filters
+            if (matchesFilter(event, subscription.getFilter())) {
+                // Dispatch to subscriber
+                dispatcher.dispatch(event, subscription);
+            }
+        }
+    }
+    
+    private boolean matchesFilter(Event event, EventFilter filter) {
+        // Source filter
+        if (filter.getSource() != null && 
+            !filter.getSource().equals(event.getSource())) {
+            return false;
+        }
+        
+        // Subject pattern filter
+        if (filter.getSubjectPattern() != null &&
+            !matchesPattern(event.getSubject(), filter.getSubjectPattern())) {
+            return false;
+        }
+        
+        // Custom attribute filters
+        for (Map.Entry<String, String> entry : filter.getAttributes().entrySet()) {
+            String value = event.getExtensions().get(entry.getKey());
+            if (value == null || !value.equals(entry.getValue())) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+}
+
+public class EventDispatcher {
+    private final WebhookClient webhookClient;
+    private final RetryPolicy retryPolicy;
+    
+    public void dispatch(Event event, Subscription subscription) {
+        DeliveryConfig delivery = subscription.getDelivery();
+        
+        CompletableFuture.runAsync(() -> {
+            try {
+                deliverEvent(event, subscription);
+            } catch (Exception e) {
+                handleDeliveryFailure(event, subscription, e);
+            }
+        });
+    }
+    
+    private void deliverEvent(Event event, Subscription subscription) {
+        switch (subscription.getDelivery().getMethod()) {
+            case "webhook":
+                deliverViaWebhook(event, subscription);
+                break;
+            case "queue":
+                deliverViaQueue(event, subscription);
+                break;
+            case "grpc":
+                deliverViaGrpc(event, subscription);
+                break;
+            default:
+                throw new IllegalArgumentException(
+                    "Unknown delivery method: " + 
+                    subscription.getDelivery().getMethod()
+                );
+        }
+    }
+    
+    private void deliverViaWebhook(Event event, Subscription subscription) {
+        String endpoint = subscription.getEndpoint();
+        
+        HttpRequest request = HttpRequest.builder()
+            .url(endpoint)
+            .method("POST")
+            .header("Content-Type", "application/cloudevents+json")
+            .header("X-Event-Id", event.getEventId())
+            .header("X-Event-Type", event.getEventType())
+            .body(serialize(CloudEvent.fromEvent(event)))
+            .build();
+        
+        HttpResponse response = webhookClient.send(request);
+        
+        if (response.getStatusCode() >= 400) {
+            throw new DeliveryException(
+                "Webhook returned error: " + response.getStatusCode()
+            );
+        }
+    }
+    
+    private void handleDeliveryFailure(
+        Event event, 
+        Subscription subscription,
+        Exception exception
+    ) {
+        RetryPolicy policy = subscription.getDelivery().getRetryPolicy();
+        
+        int attempts = getAttemptCount(event.getEventId(), subscription.getId());
+        
+        if (attempts < policy.getMaxAttempts()) {
+            // Schedule retry with backoff
+            long delay = calculateBackoff(attempts, policy);
+            scheduleRetry(event, subscription, delay);
+        } else {
+            // Move to dead letter queue
+            sendToDeadLetterQueue(event, subscription, exception);
+        }
+    }
+}
+```
+
+#### 2.2.6 Consumer Groups
+**Implementation**:
+```java
+public class ConsumerGroup {
+    private final String groupId;
+    private final EventBroker broker;
+    private final List<Consumer> consumers = new CopyOnWriteArrayList<>();
+    
+    public void addConsumer(Consumer consumer) {
+        consumers.add(consumer);
+        consumer.start();
+    }
+    
+    public void removeConsumer(Consumer consumer) {
+        consumer.stop();
+        consumers.remove(consumer);
+    }
+    
+    public void rebalance() {
+        // Kafka handles rebalancing automatically
+        // For other brokers, implement custom rebalancing logic
+        List<String> partitions = broker.getPartitions(topic);
+        
+        // Distribute partitions among consumers
+        for (int i = 0; i < partitions.size(); i++) {
+            Consumer consumer = consumers.get(i % consumers.size());
+            consumer.assignPartition(partitions.get(i));
+        }
+    }
+}
+
+public class Consumer {
+    private final String consumerId;
+    private final EventHandler handler;
+    private final EventBroker broker;
+    private volatile boolean running = false;
+    
+    public void start() {
+        running = true;
+        
+        Thread thread = new Thread(() -> {
+            while (running) {
+                try {
+                    List<Event> events = broker.poll(
+                        assignedPartitions,
+                        Duration.ofMillis(100)
+                    );
+                    
+                    for (Event event : events) {
+                        processEvent(event);
+                    }
+                } catch (Exception e) {
+                    log.error("Error polling events", e);
+                }
+            }
+        });
+        
+        thread.start();
+    }
+    
+    private void processEvent(Event event) {
+        try {
+            handler.handle(event);
+            broker.commit(event.getOffset());
+        } catch (Exception e) {
+            log.error("Error processing event: {}", event.getEventId(), e);
+            handleProcessingError(event, e);
+        }
+    }
+    
+    private void handleProcessingError(Event event, Exception exception) {
+        int retries = getRetryCount(event.getEventId());
+        
+        if (retries < MAX_RETRIES) {
+            // Retry with exponential backoff
+            long delay = (long) Math.pow(2, retries) * 1000;
+            scheduleRetry(event, delay);
+        } else {
+            // Send to DLQ
+            deadLetterQueue.send(event, exception);
+        }
+    }
+}
+```
+
+#### 2.2.7 Schema Registry
+**Schema Management**:
+```javascript
+// Schemas Table
+{
+  TableName: "EventSchemas",
+  KeySchema: [
+    { AttributeName: "event_type", KeyType: "HASH" },
+    { AttributeName: "version", KeyType: "RANGE" }
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "event_type", AttributeType: "S" },
+    { AttributeName: "version", AttributeType: "S" }
+  ]
+}
+
+// Document Structure
+{
+  "event_type": "user.created",
+  "version": "1.0",
+  "schema_format": "json-schema",
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "user_id": {
+        "type": "string"
+      },
+      "username": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 50
+      },
+      "email": {
+        "type": "string",
+        "format": "email"
+      }
+    },
+    "required": ["user_id", "username", "email"]
+  },
+  "compatibility_mode": "BACKWARD",
+  "created_at": 1704067200000,
+  "created_by": "admin"
+}
+```
+
+**Schema Validation**:
+```java
+public class SchemaRegistry {
+    private final DynamoDB dynamoDB;
+    private final Cache<String, Schema> schemaCache;
+    
+    public Schema getSchema(String eventType, String version) {
+        String cacheKey = eventType + ":" + version;
+        
+        return schemaCache.get(cacheKey, key -> {
+            GetItemResult result = dynamoDB.getItem(new GetItemRequest()
+                .withTableName("EventSchemas")
+                .withKey(Map.of(
+                    "event_type", new AttributeValue(eventType),
+                    "version", new AttributeValue(version)
+                ))
+            );
+            
+            if (result.getItem() == null) {
+                throw new SchemaNotFoundException(
+                    "Schema not found: " + eventType + ":" + version
+                );
+            }
+            
+            return parseSchema(result.getItem());
+        });
+    }
+    
+    public void registerSchema(
+        String eventType,
+        String version,
+        String schemaJson
+    ) {
+        // Validate schema format
+        Schema schema = parseSchema(schemaJson);
+        
+        // Check compatibility with previous versions
+        List<Schema> previousVersions = getPreviousVersions(eventType);
+        if (!isCompatible(schema, previousVersions)) {
+            throw new IncompatibleSchemaException(
+                "Schema is not compatible with previous versions"
+            );
+        }
+        
+        // Store schema
+        dynamoDB.putItem(new PutItemRequest()
+            .withTableName("EventSchemas")
+            .withItem(Map.of(
+                "event_type", new AttributeValue(eventType),
+                "version", new AttributeValue(version),
+                "schema_format", new AttributeValue("json-schema"),
+                "schema", new AttributeValue().withM(convertSchema(schema)),
+                "created_at", new AttributeValue().withN(
+                    String.valueOf(System.currentTimeMillis())
+                )
+            ))
+        );
+        
+        // Invalidate cache
+        schemaCache.invalidate(eventType + ":" + version);
+    }
+}
+```
+
+## 3. Event Processing Patterns
+
+### 3.1 Event Sourcing
+```java
+public class EventStore {
+    private final DynamoDB dynamoDB;
+    
+    public void append(String aggregateId, Event event) {
+        dynamoDB.putItem(new PutItemRequest()
+            .withTableName("Events")
+            .withItem(Map.of(
+                "aggregate_id", new AttributeValue(aggregateId),
+                "sequence", new AttributeValue().withN(
+                    String.valueOf(getNextSequence(aggregateId))
+                ),
+                "event_id", new AttributeValue(event.getEventId()),
+                "event_type", new AttributeValue(event.getEventType()),
+                "event_data", new AttributeValue().withM(
+                    convertEventData(event.getData())
+                ),
+                "timestamp", new AttributeValue().withN(
+                    String.valueOf(event.getTimestamp().toEpochMilli())
+                )
+            ))
+            .withConditionExpression("attribute_not_exists(aggregate_id)")
+        );
+    }
+    
+    public List<Event> getEvents(String aggregateId) {
+        QueryResult result = dynamoDB.query(new QueryRequest()
+            .withTableName("Events")
+            .withKeyConditionExpression("aggregate_id = :id")
+            .withExpressionAttributeValues(Map.of(
+                ":id", new AttributeValue(aggregateId)
+            ))
+            .withScanIndexForward(true)
+        );
+        
+        return result.getItems().stream()
+            .map(this::deserializeEvent)
+            .collect(Collectors.toList());
+    }
+    
+    public <T> T reconstructAggregate(String aggregateId, Class<T> type) {
+        List<Event> events = getEvents(aggregateId);
+        
+        T aggregate = type.getDeclaredConstructor().newInstance();
+        
+        for (Event event : events) {
+            ((EventSourced) aggregate).apply(event);
+        }
+        
+        return aggregate;
+    }
+}
+```
+
+### 3.2 CQRS (Command Query Responsibility Segregation)
+```java
+public class CommandHandler {
+    private final EventStore eventStore;
+    private final EventPublisher eventPublisher;
+    
+    public void handle(CreateUserCommand command) {
+        // Validate command
+        validateCommand(command);
+        
+        // Create event
+        Event event = Event.builder()
+            .eventId(UUID.randomUUID().toString())
+            .eventType("user.created")
+            .source("user-service")
+            .subject("user:" + command.getUserId())
+            .data(Map.of(
+                "user_id", command.getUserId(),
+                "username", command.getUsername(),
+                "email", command.getEmail()
+            ))
+            .build();
+        
+        // Append to event store
+        eventStore.append(command.getUserId(), event);
+        
+        // Publish event
+        eventPublisher.publish(event);
+    }
+}
+
+public class QueryHandler {
+    private final ReadModelRepository readModelRepository;
+    
+    public User getUser(String userId) {
+        return readModelRepository.findById(userId);
+    }
+    
+    public List<User> searchUsers(String query) {
+        return readModelRepository.search(query);
+    }
+}
+
+// Read model updater (event handler)
+public class UserReadModelUpdater implements EventHandler {
+    private final ReadModelRepository repository;
+    
+    @Override
+    public void handle(Event event) {
+        if (event.getEventType().equals("user.created")) {
+            Map<String, Object> data = (Map<String, Object>) event.getData();
+            
+            User user = User.builder()
+                .userId((String) data.get("user_id"))
+                .username((String) data.get("username"))
+                .email((String) data.get("email"))
+                .build();
+            
+            repository.save(user);
+        }
+    }
+}
+```
+
+### 3.3 Saga Pattern
+```java
+public class OrderSaga {
+    private final EventPublisher eventPublisher;
+    
+    @EventHandler("order.created")
+    public void onOrderCreated(Event event) {
+        Map<String, Object> data = (Map<String, Object>) event.getData();
+        String orderId = (String) data.get("order_id");
+        
+        // Step 1: Reserve inventory
+        eventPublisher.publish(Event.builder()
+            .eventType("inventory.reserve")
+            .subject("order:" + orderId)
+            .data(Map.of(
+                "order_id", orderId,
+                "items", data.get("items")
+            ))
+            .correlationId(event.getEventId())
+            .build()
+        );
+    }
+    
+    @EventHandler("inventory.reserved")
+    public void onInventoryReserved(Event event) {
+        Map<String, Object> data = (Map<String, Object>) event.getData();
+        String orderId = (String) data.get("order_id");
+        
+        // Step 2: Process payment
+        eventPublisher.publish(Event.builder()
+            .eventType("payment.process")
+            .subject("order:" + orderId)
+            .data(Map.of(
+                "order_id", orderId,
+                "amount", data.get("total_amount")
+            ))
+            .correlationId(event.getCorrelationId())
+            .build()
+        );
+    }
+    
+    @EventHandler("payment.processed")
+    public void onPaymentProcessed(Event event) {
+        Map<String, Object> data = (Map<String, Object>) event.getData();
+        String orderId = (String) data.get("order_id");
+        
+        // Step 3: Complete order
+        eventPublisher.publish(Event.builder()
+            .eventType("order.completed")
+            .subject("order:" + orderId)
+            .data(Map.of("order_id", orderId))
+            .correlationId(event.getCorrelationId())
+            .build()
+        );
+    }
+    
+    @EventHandler("payment.failed")
+    public void onPaymentFailed(Event event) {
+        Map<String, Object> data = (Map<String, Object>) event.getData();
+        String orderId = (String) data.get("order_id");
+        
+        // Compensating transaction: Release inventory
+        eventPublisher.publish(Event.builder()
+            .eventType("inventory.release")
+            .subject("order:" + orderId)
+            .data(Map.of("order_id", orderId))
+            .correlationId(event.getCorrelationId())
+            .build()
+        );
+    }
+}
+```
+
+## 4. Monitoring
+
+### 4.1 Metrics
+```
+# Publishing
+events_published_total{event_type}
+events_published_bytes_total
+events_publish_duration_seconds
+
+# Consumption
+events_consumed_total{event_type, consumer_group}
+events_processing_duration_seconds{event_type}
+events_processing_errors_total{event_type, error_type}
+
+# Routing
+events_routed_total{event_type, subscription}
+events_delivery_attempts_total{subscription, result}
+
+# Lag
+consumer_lag_seconds{consumer_group, partition}
+```
+
+## 5. Configuration
+```yaml
+eventing:
+  broker:
+    type: kafka  # kafka, kinesis, pubsub
+    bootstrap_servers: kafka:9092
+    
+  publisher:
+    batch_size: 100
+    linger_ms: 10
+    compression: gzip
+    
+  consumer:
+    group_id: ${SERVICE_NAME}
+    auto_commit: false
+    max_poll_records: 500
+    
+  schema_registry:
+    enabled: true
+    validation: strict  # strict, lenient, none
+    
+  delivery:
+    retry:
+      max_attempts: 3
+      backoff: exponential
+      initial_delay: 1s
+      max_delay: 60s
+    dead_letter_queue:
+      enabled: true
+      retention: 7d
+      
+  storage:
+    retention: 60d
+    compression: true
+```
+
+This completes the Eventing Component Design. Now let me create the Logging Component Design.

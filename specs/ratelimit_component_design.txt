@@ -1,0 +1,349 @@
+# Rate Limiting & Metering Component Design
+
+## 1. Overview
+
+### 1.1 Purpose
+The Rate Limiting & Metering component controls request rates, tracks resource usage, enforces quotas, and provides billing data for the enterprise framework. It ensures fair resource allocation, prevents abuse, and enables usage-based pricing.
+
+### 1.2 Design Principles
+- **Fair Usage**: Prevent resource exhaustion by any single user
+- **Accuracy**: Precise metering for billing purposes
+- **Performance**: Sub-5ms rate limit checks
+- **Scalability**: Handle millions of requests per second
+- **Flexibility**: Support multiple rate limiting algorithms
+
+## 2. Architecture
+
+### 2.1 High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    API Gateway / Edge Layer                      │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────┴────────────────────────────────────┐
+│              Rate Limiting & Metering Service                    │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Rate Limit   │  │ Metering     │  │ Quota        │          │
+│  │ API          │  │ API          │  │ Management   │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+│  ┌──────┴──────────────────┴──────────────────┴───────┐         │
+│  │          Rate Limiting Engine                       │         │
+│  │                                                      │         │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │         │
+│  │  │  Token   │  │  Leaky   │  │ Sliding  │         │         │
+│  │  │  Bucket  │  │  Bucket  │  │  Window  │         │         │
+│  │  └──────────┘  └──────────┘  └──────────┘         │         │
+│  │                                                      │         │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │         │
+│  │  │ Fixed    │  │ Concurrent│ │ Cost     │         │         │
+│  │  │ Window   │  │  Limiter │  │  Based   │         │         │
+│  │  └──────────┘  └──────────┘  └──────────┘         │         │
+│  └──────────────────────────────────────────────────┘         │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │          Metering Engine                          │          │
+│  │                                                    │          │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐       │          │
+│  │  │ Usage    │  │ Event    │  │ Aggreg-  │       │          │
+│  │  │ Tracker  │  │ Collector│  │  ation   │       │          │
+│  │  └──────────┘  └──────────┘  └──────────┘       │          │
+│  └──────────────────────────────────────────────────┘          │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ Quota        │  │ Policy       │  │ Anomaly      │          │
+│  │ Enforcer     │  │ Manager      │  │ Detector     │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+└─────────┴──────────────────┴──────────────────┴───────────────┘
+          │                  │                  │
+┌─────────▼────────┐  ┌──────▼───────┐  ┌─────▼──────────┐
+│  Counter Store   │  │ Usage Store  │  │  Quota Store   │
+│  (Redis)         │  │ (TimescaleDB)│  │  (PostgreSQL)  │
+└──────────────────┘  └──────────────┘  └────────────────┘
+          │                  │                  │
+┌─────────▼─────────────────▼──────────────────▼──────────┐
+│          Billing Integration & Analytics                 │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 2.2 Component Breakdown
+
+#### 2.2.1 Rate Limiting Service
+**Responsibilities**:
+- Process rate limit checks
+- Apply rate limiting algorithms
+- Return quota information in headers
+- Handle rate limit errors
+
+**API Endpoints**:
+```
+# Rate limit operations
+POST   /ratelimit/v1/check
+POST   /ratelimit/v1/batch-check
+GET    /ratelimit/v1/status/{key}
+DELETE /ratelimit/v1/reset/{key}
+
+# Quota management
+GET    /ratelimit/v1/quotas/{userId}
+GET    /ratelimit/v1/quotas/{userId}/{resourceType}
+PUT    /ratelimit/v1/quotas/{userId}
+POST   /ratelimit/v1/quotas/{userId}/increase
+
+# Usage queries
+GET    /ratelimit/v1/usage/{userId}
+GET    /ratelimit/v1/usage/{userId}/current-period
+GET    /ratelimit/v1/usage/{userId}/history
+
+# Admin operations
+POST   /ratelimit/v1/policies
+PUT    /ratelimit/v1/policies/{policyId}
+DELETE /ratelimit/v1/policies/{policyId}
+GET    /ratelimit/v1/policies
+```
+
+#### 2.2.2 Rate Limiting Engine
+**Responsibilities**:
+- Implement rate limiting algorithms
+- Coordinate distributed rate limiting
+- Manage rate limit state
+- Provide accurate counting
+
+**Core Interfaces**:
+```java
+public interface RateLimiter {
+    RateLimitResult check(RateLimitRequest request);
+    void reset(String key);
+    RateLimitStatus getStatus(String key);
+}
+
+public class RateLimitRequest {
+    String key;                     // User ID, IP, API key, etc.
+    String resource;                // API endpoint or resource
+    int tokens;                     // Number of tokens to consume
+    Map<String, String> labels;     // Additional dimensions
+    long timestamp;
+}
+
+public class RateLimitResult {
+    boolean allowed;
+    long remaining;
+    long resetAt;                   // Unix timestamp
+    long retryAfter;                // Seconds until retry
+    String limitName;
+    RateLimitInfo info;
+}
+
+public class RateLimitInfo {
+    long limit;                     // Total limit
+    long used;                      // Used in current window
+    long remaining;                 // Remaining in current window
+    long resetAt;                   // When limit resets
+    String algorithm;               // Algorithm used
+}
+```
+
+#### 2.2.3 Rate Limiting Algorithms
+
+**Token Bucket Algorithm**:
+```java
+public class TokenBucketRateLimiter implements RateLimiter {
+    private final RedisTemplate<String, String> redis;
+    
+    @Override
+    public RateLimitResult check(RateLimitRequest request) {
+        String key = buildKey(request);
+        long now = System.currentTimeMillis();
+        
+        // Lua script for atomic token bucket operation
+        String script = """
+            local key = KEYS[1]
+            local capacity = tonumber(ARGV[1])
+            local refill_rate = tonumber(ARGV[2])
+            local requested = tonumber(ARGV[3])
+            local now = tonumber(ARGV[4])
+            
+            local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+            local tokens = tonumber(bucket[1]) or capacity
+            local last_refill = tonumber(bucket[2]) or now
+            
+            -- Calculate tokens to add based on time elapsed
+            local elapsed = math.max(0, now - last_refill)
+            local tokens_to_add = math.floor(elapsed * refill_rate / 1000)
+            tokens = math.min(capacity, tokens + tokens_to_add)
+            
+            -- Check if enough tokens available
+            if tokens >= requested then
+                tokens = tokens - requested
+                redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+                redis.call('EXPIRE', key, 3600)
+                return {1, tokens}
+            else
+                return {0, tokens}
+            end
+            """;
+        
+        List<Long> result = redis.execute(
+            script,
+            List.of(key),
+            capacity, refillRate, request.tokens, now
+        );
+        
+        boolean allowed = result.get(0) == 1;
+        long remaining = result.get(1);
+        
+        return RateLimitResult.builder()
+            .allowed(allowed)
+            .remaining(remaining)
+            .resetAt(calculateResetTime(remaining, refillRate))
+            .retryAfter(allowed ? 0 : calculateRetryAfter(remaining, refillRate))
+            .build();
+    }
+}
+```
+
+**Sliding Window Counter**:
+```java
+public class SlidingWindowRateLimiter implements RateLimiter {
+    private final RedisTemplate<String, String> redis;
+    
+    @Override
+    public RateLimitResult check(RateLimitRequest request) {
+        String key = buildKey(request);
+        long now = System.currentTimeMillis();
+        long windowSize = config.getWindowSize();
+        long windowStart = now - windowSize;
+        
+        // Lua script for sliding window
+        String script = """
+            local key = KEYS[1]
+            local limit = tonumber(ARGV[1])
+            local window_start = tonumber(ARGV[2])
+            local now = tonumber(ARGV[3])
+            local request_id = ARGV[4]
+            
+            -- Remove old entries outside window
+            redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
+            
+            -- Count current entries
+            local count = redis.call('ZCARD', key)
+            
+            if count < limit then
+                -- Add new entry
+                redis.call('ZADD', key, now, request_id)
+                redis.call('EXPIRE', key, 60)
+                return {1, limit - count - 1}
+            else
+                return {0, 0}
+            end
+            """;
+        
+        List<Long> result = redis.execute(
+            script,
+            List.of(key),
+            limit, windowStart, now, UUID.randomUUID().toString()
+        );
+        
+        return RateLimitResult.builder()
+            .allowed(result.get(0) == 1)
+            .remaining(result.get(1))
+            .build();
+    }
+}
+```
+
+**Fixed Window Counter**:
+```java
+public class FixedWindowRateLimiter implements RateLimiter {
+    private final RedisTemplate<String, String> redis;
+    
+    @Override
+    public RateLimitResult check(RateLimitRequest request) {
+        String key = buildKey(request);
+        long now = System.currentTimeMillis();
+        long window = now / config.getWindowSize();
+        String windowKey = key + ":" + window;
+        
+        Long count = redis.opsForValue().increment(windowKey);
+        
+        if (count == 1) {
+            redis.expire(windowKey, config.getWindowSize(), TimeUnit.MILLISECONDS);
+        }
+        
+        boolean allowed = count <= config.getLimit();
+        long remaining = Math.max(0, config.getLimit() - count);
+        long resetAt = (window + 1) * config.getWindowSize();
+        
+        return RateLimitResult.builder()
+            .allowed(allowed)
+            .remaining(remaining)
+            .resetAt(resetAt)
+            .retryAfter(allowed ? 0 : (resetAt - now) / 1000)
+            .build();
+    }
+}
+```
+
+**Concurrent Request Limiter**:
+```java
+public class ConcurrentRequestLimiter implements RateLimiter {
+    private final RedisTemplate<String, String> redis;
+    
+    @Override
+    public RateLimitResult acquire(RateLimitRequest request) {
+        String key = buildKey(request);
+        String requestId = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        long timeout = config.getTimeout();
+        
+        // Lua script for concurrent limit
+        String script = """
+            local key = KEYS[1]
+            local limit = tonumber(ARGV[1])
+            local request_id = ARGV[2]
+            local now = tonumber(ARGV[3])
+            local timeout = tonumber(ARGV[4])
+            
+            -- Remove expired requests
+            redis.call('ZREMRANGEBYSCORE', key, '-inf', now - timeout)
+            
+            -- Check current count
+            local count = redis.call('ZCARD', key)
+            
+            if count < limit then
+                redis.call('ZADD', key, now, request_id)
+                redis.call('EXPIRE', key, timeout / 1000)
+                return {1, request_id}
+            else
+                return {0, ''}
+            end
+            """;
+        
+        List<Object> result = redis.execute(
+            script,
+            List.of(key),
+            config.getLimit(), requestId, now, timeout
+        );
+        
+        return RateLimitResult.builder()
+            .allowed((Long)result.get(0) == 1)
+            .requestId((String)result.get(1))
+            .build();
+    }
+    
+    public void release(String key, String requestId) {
+        redis.opsForZSet().remove(key, requestId);
+    }
+}
+```
+
+#### 2.2.4 Distributed Rate Limiting
+**Responsibilities**:
+- Coordinate rate limiting across instances
+- Handle eventually consistent counting
+- Provide local rate limiting with sync
+- Manage distributed state
+
+**Implementation

@@ -1,0 +1,1190 @@
+# Distributed Tracing Component Design
+
+## 1. Overview
+
+### 1.1 Purpose
+The Distributed Tracing component provides end-to-end visibility into request flows across microservices. It tracks request propagation, measures latency, identifies bottlenecks, and enables root cause analysis.
+
+### 1.2 Design Principles
+- **Low Overhead**: < 1% latency impact on requests
+- **Context Propagation**: Automatic trace context transmission
+- **Sampling Intelligence**: Smart sampling to reduce volume
+- **Standard Compliance**: W3C Trace Context, OpenTelemetry
+- **Real-Time Processing**: Sub-second trace availability
+
+## 2. Architecture
+
+### 2.1 High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Application Services                        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Service A│  │ Service B│  │ Service C│  │ Service D│       │
+│  │ (Instr.) │→ │ (Instr.) │→ │ (Instr.) │→ │ (Instr.) │       │
+│  └─────┬────┘  └─────┬────┘  └─────┬────┘  └─────┬────┘       │
+│        │             │              │              │             │
+└────────┼─────────────┼──────────────┼──────────────┼───────────┘
+         │             │              │              │
+         └─────────────┴──────────────┴──────────────┘
+                            │
+┌───────────────────────────┴────────────────────────────────────┐
+│                    Tracing Collector                            │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │ Span Receiver│  │ Trace        │  │ Sampling     │         │
+│  │ (OTLP, Jaeger│  │ Assembler    │  │ Engine       │         │
+│  │  Zipkin)     │  │              │  │              │         │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘         │
+│         │                  │                  │                  │
+│  ┌──────┴──────────────────┴──────────────────┴───────┐        │
+│  │          Span Processing Pipeline                   │        │
+│  │                                                      │        │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │        │
+│  │  │ Context  │  │ Enrich-  │  │  Filter  │         │        │
+│  │  │ Extract  │  │  ment    │  │          │         │        │
+│  │  └──────────┘  └──────────┘  └──────────┘         │        │
+│  │                                                      │        │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │        │
+│  │  │ Metrics  │  │  Index   │  │ Storage  │         │        │
+│  │  │ Extract  │  │ Builder  │  │ Writer   │         │        │
+│  │  └──────────┘  └──────────┘  └──────────┘         │        │
+│  └──────────────────────────────────────────────────┘        │
+└───────────────────────────┬────────────────────────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+┌───────▼────────┐  ┌───────▼────────┐  ┌──────▼──────────┐
+│  Span Store    │  │  Trace Index   │  │  Metrics Store  │
+│  (DynamoDB)    │  │  (DynamoDB)    │  │  (Redis)        │
+└────────────────┘  └────────────────┘  └─────────────────┘
+        │                   │                   │
+┌───────▼───────────────────▼───────────────────▼──────────┐
+│              Trace Query & Analysis Service               │
+└───────────────────────────────────────────────────────────┘
+```
+
+### 2.2 Component Breakdown
+
+#### 2.2.1 Tracing SDK (Client Library)
+**Responsibilities**:
+- Automatic instrumentation
+- Span creation and management
+- Context propagation
+- Sampling decisions
+
+**Core Interfaces**:
+```java
+public interface Tracer {
+    Span startSpan(String operationName);
+    Span startSpan(String operationName, SpanContext parent);
+    void injectContext(SpanContext context, Map<String, String> carrier);
+    SpanContext extractContext(Map<String, String> carrier);
+}
+
+public class Span {
+    String traceId;
+    String spanId;
+    String parentSpanId;
+    String operationName;
+    SpanKind kind;                  // CLIENT, SERVER, INTERNAL, PRODUCER, CONSUMER
+    long startTime;
+    long endTime;
+    Map<String, String> tags;
+    List<SpanEvent> events;
+    List<SpanLink> links;
+    SpanStatus status;
+}
+
+public class SpanContext {
+    String traceId;                 // 128-bit trace ID
+    String spanId;                  // 64-bit span ID
+    TraceFlags flags;               // Sampling decision
+    TraceState state;               // Vendor-specific data
+}
+
+// W3C Trace Context format
+public class W3CTraceContext {
+    // traceparent: 00-{trace-id}-{parent-id}-{flags}
+    // tracestate: vendor1=value1,vendor2=value2
+    
+    public static String formatTraceParent(SpanContext ctx) {
+        return String.format("00-%s-%s-%02x",
+            ctx.traceId,
+            ctx.spanId,
+            ctx.flags.asByte()
+        );
+    }
+    
+    public static SpanContext parseTraceParent(String header) {
+        String[] parts = header.split("-");
+        return SpanContext.builder()
+            .traceId(parts[1])
+            .spanId(parts[2])
+            .flags(TraceFlags.fromByte(Byte.parseByte(parts[3], 16)))
+            .build();
+    }
+}
+```
+
+**Automatic Instrumentation**:
+```java
+@Aspect
+public class TracingAspect {
+    private final Tracer tracer;
+    
+    @Around("@annotation(Traced)")
+    public Object traceMethod(ProceedingJoinPoint joinPoint) throws Throwable {
+        String operationName = joinPoint.getSignature().getName();
+        Span span = tracer.startSpan(operationName);
+        
+        try {
+            // Add method parameters as tags
+            Object[] args = joinPoint.getArgs();
+            for (int i = 0; i < args.length; i++) {
+                span.setTag("arg." + i, String.valueOf(args[i]));
+            }
+            
+            Object result = joinPoint.proceed();
+            
+            span.setTag("result", String.valueOf(result));
+            span.finish();
+            
+            return result;
+        } catch (Exception e) {
+            span.setTag("error", true);
+            span.setTag("error.message", e.getMessage());
+            span.recordException(e);
+            span.finish();
+            throw e;
+        }
+    }
+}
+
+// HTTP Client Instrumentation
+public class TracedHttpClient {
+    private final Tracer tracer;
+    private final HttpClient delegate;
+    
+    public Response execute(Request request) {
+        Span span = tracer.startSpan(
+            "HTTP " + request.getMethod(),
+            SpanKind.CLIENT
+        );
+        
+        // Add HTTP attributes
+        span.setTag("http.method", request.getMethod());
+        span.setTag("http.url", request.getUrl());
+        span.setTag("http.target", request.getPath());
+        
+        // Inject trace context
+        tracer.injectContext(
+            span.getContext(),
+            request.getHeaders()
+        );
+        
+        try {
+            Response response = delegate.execute(request);
+            
+            span.setTag("http.status_code", response.getStatusCode());
+            span.finish();
+            
+            return response;
+        } catch (Exception e) {
+            span.recordException(e);
+            span.setStatus(SpanStatus.ERROR);
+            span.finish();
+            throw e;
+        }
+    }
+}
+```
+
+#### 2.2.2 Span Receiver
+**Responsibilities**:
+- Accept spans via multiple protocols
+- Validate span data
+- Buffer incoming spans
+- Handle backpressure
+
+**Protocol Support**:
+```java
+// OTLP (OpenTelemetry Protocol)
+@GrpcService
+public class OtlpSpanReceiver extends TraceServiceGrpc.TraceServiceImplBase {
+    
+    @Override
+    public void export(
+        ExportTraceServiceRequest request,
+        StreamObserver<ExportTraceServiceResponse> responseObserver
+    ) {
+        for (ResourceSpans resourceSpans : request.getResourceSpansList()) {
+            for (ScopeSpans scopeSpans : resourceSpans.getScopeSpansList()) {
+                for (Span span : scopeSpans.getSpansList()) {
+                    spanProcessor.process(convertSpan(span));
+                }
+            }
+        }
+        
+        responseObserver.onNext(ExportTraceServiceResponse.getDefaultInstance());
+        responseObserver.onCompleted();
+    }
+}
+
+// Jaeger Protocol
+@RestController
+public class JaegerSpanReceiver {
+    
+    @PostMapping("/api/traces")
+    public ResponseEntity<Void> receiveJaegerBatch(
+        @RequestBody JaegerBatch batch
+    ) {
+        for (JaegerSpan span : batch.getSpans()) {
+            spanProcessor.process(convertFromJaeger(span));
+        }
+        
+        return ResponseEntity.accepted().build();
+    }
+}
+
+// Zipkin Protocol
+@RestController
+public class ZipkinSpanReceiver {
+    
+    @PostMapping("/api/v2/spans")
+    public ResponseEntity<Void> receiveZipkinSpans(
+        @RequestBody List<ZipkinSpan> spans
+    ) {
+        spans.forEach(span -> 
+            spanProcessor.process(convertFromZipkin(span))
+        );
+        
+        return ResponseEntity.accepted().build();
+    }
+}
+```
+
+#### 2.2.3 Sampling Engine
+**Responsibilities**:
+- Make sampling decisions
+- Implement multiple sampling strategies
+- Respect parent sampling decisions
+- Track sampling statistics
+
+**Sampling Strategies**:
+```java
+public interface SamplingStrategy {
+    SamplingDecision shouldSample(SamplingContext context);
+}
+
+// Probabilistic Sampling
+public class ProbabilisticSampler implements SamplingStrategy {
+    private final double samplingRate;
+    
+    @Override
+    public SamplingDecision shouldSample(SamplingContext context) {
+        // Use trace ID for consistent sampling across services
+        long traceIdHash = hashTraceId(context.getTraceId());
+        double probability = (double)(traceIdHash & 0xFFFFFFFFL) / 0x100000000L;
+        
+        boolean sampled = probability < samplingRate;
+        
+        return SamplingDecision.builder()
+            .sampled(sampled)
+            .reason("probabilistic:" + samplingRate)
+            .build();
+    }
+}
+
+// Rate Limiting Sampler
+public class RateLimitingSampler implements SamplingStrategy {
+    private final TokenBucket bucket;
+    
+    @Override
+    public SamplingDecision shouldSample(SamplingContext context) {
+        boolean sampled = bucket.tryConsume(1);
+        
+        return SamplingDecision.builder()
+            .sampled(sampled)
+            .reason("rate_limit:" + bucket.getRate())
+            .build();
+    }
+}
+
+// Tail-Based Sampler (after trace completion)
+public class TailBasedSampler implements SamplingStrategy {
+    
+    @Override
+    public SamplingDecision shouldSample(SamplingContext context) {
+        Trace trace = context.getCompletedTrace();
+        
+        // Always sample errors
+        if (trace.hasErrors()) {
+            return SamplingDecision.sampled("error_trace");
+        }
+        
+        // Sample slow traces
+        if (trace.getDuration() > Duration.ofSeconds(5)) {
+            return SamplingDecision.sampled("slow_trace");
+        }
+        
+        // Sample by service importance
+        if (trace.includesService("payment-service")) {
+            return SamplingDecision.sampled("critical_service");
+        }
+        
+        // Default probabilistic sampling
+        return new ProbabilisticSampler(0.01).shouldSample(context);
+    }
+}
+
+// Parent-Based Sampler
+public class ParentBasedSampler implements SamplingStrategy {
+    private final SamplingStrategy rootSampler;
+    
+    @Override
+    public SamplingDecision shouldSample(SamplingContext context) {
+        SpanContext parent = context.getParentContext();
+        
+        // If parent exists, follow parent's decision
+        if (parent != null) {
+            boolean sampled = parent.getFlags().isSampled();
+            return SamplingDecision.builder()
+                .sampled(sampled)
+                .reason("parent_based")
+                .build();
+        }
+        
+        // For root spans, use root sampler
+        return rootSampler.shouldSample(context);
+    }
+}
+
+// Adaptive Sampler (ML-based)
+public class AdaptiveSampler implements SamplingStrategy {
+    private final SamplingModel model;
+    
+    @Override
+    public SamplingDecision shouldSample(SamplingContext context) {
+        // Extract features
+        double[] features = extractFeatures(context);
+        
+        // Predict sampling decision
+        double score = model.predict(features);
+        boolean sampled = score > 0.5;
+        
+        return SamplingDecision.builder()
+            .sampled(sampled)
+            .reason("adaptive:score=" + score)
+            .build();
+    }
+    
+    private double[] extractFeatures(SamplingContext context) {
+        return new double[] {
+            context.getServiceId().hashCode(),
+            context.getOperationName().hashCode(),
+            context.getExpectedDuration(),
+            context.getErrorProbability(),
+            context.getBusinessCriticality()
+        };
+    }
+}
+```
+
+#### 2.2.4 Span Processing Pipeline
+**Responsibilities**:
+- Process spans in real-time
+- Enrich with metadata
+- Extract metrics
+- Build indexes
+
+**Implementation**:
+```java
+public class SpanProcessor {
+    private final List<SpanEnricher> enrichers;
+    private final List<SpanFilter> filters;
+    private final MetricsExtractor metricsExtractor;
+    private final IndexBuilder indexBuilder;
+    private final StorageWriter storageWriter;
+    
+    public void process(Span span) {
+        // 1. Enrich span
+        for (SpanEnricher enricher : enrichers) {
+            span = enricher.enrich(span);
+        }
+        
+        // 2. Filter span
+        for (SpanFilter filter : filters) {
+            if (!filter.shouldKeep(span)) {
+                return;  // Drop span
+            }
+        }
+        
+        // 3. Extract metrics
+        metricsExtractor.extract(span);
+        
+        // 4. Build indexes
+        indexBuilder.index(span);
+        
+        // 5. Store span
+        storageWriter.write(span);
+    }
+}
+
+// Span Enrichment
+public class ServiceInfoEnricher implements SpanEnricher {
+    
+    @Override
+    public Span enrich(Span span) {
+        String serviceName = span.getTag("service.name");
+        ServiceInfo info = serviceRegistry.getServiceInfo(serviceName);
+        
+        span.setTag("service.version", info.getVersion());
+        span.setTag("service.environment", info.getEnvironment());
+        span.setTag("service.cluster", info.getCluster());
+        
+        return span;
+    }
+}
+
+// Metrics Extraction
+public class MetricsExtractor {
+    private final MetricsRegistry metrics;
+    
+    public void extract(Span span) {
+        // Request count
+        metrics.counter("trace.spans.total")
+            .tag("service", span.getServiceName())
+            .tag("operation", span.getOperationName())
+            .increment();
+        
+        // Latency
+        long duration = span.getEndTime() - span.getStartTime();
+        metrics.histogram("trace.span.duration")
+            .tag("service", span.getServiceName())
+            .tag("operation", span.getOperationName())
+            .record(duration);
+        
+        // Error rate
+        if (span.getStatus().isError()) {
+            metrics.counter("trace.spans.errors")
+                .tag("service", span.getServiceName())
+                .tag("operation", span.getOperationName())
+                .increment();
+        }
+    }
+}
+```
+
+## 3. Data Models
+
+### 3.1 Span Storage (DynamoDB)
+```javascript
+// Spans Table
+{
+  TableName: "Spans",
+  KeySchema: [
+    { AttributeName: "trace_id", KeyType: "HASH" },      // Partition key
+    { AttributeName: "span_id", KeyType: "RANGE" }       // Sort key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "trace_id", AttributeType: "S" },
+    { AttributeName: "span_id", AttributeType: "S" },
+    { AttributeName: "start_time", AttributeType: "N" },
+    { AttributeName: "service_name", AttributeType: "S" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "ServiceTimeIndex",
+      KeySchema: [
+        { AttributeName: "service_name", KeyType: "HASH" },
+        { AttributeName: "start_time", KeyType: "RANGE" }
+      ],
+      ProjectionType: "ALL"
+    }
+  ],
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure
+{
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "parent_span_id": "00f067aa0ba902b6",
+  "operation_name": "GET /api/users",
+  "kind": "SERVER",  // CLIENT, SERVER, INTERNAL, PRODUCER, CONSUMER
+  "start_time": 1704067200000000,  // microseconds
+  "end_time": 1704067200150000,
+  "duration_us": 150000,
+  "service_name": "user-service",
+  "tags": {
+    "http.method": "GET",
+    "http.url": "/api/users",
+    "http.status_code": 200,
+    "db.system": "postgresql",
+    "db.statement": "SELECT * FROM users"
+  },
+  "events": [
+    {
+      "timestamp": 1704067200050000,
+      "name": "cache_miss",
+      "attributes": {
+        "cache.key": "user:123"
+      }
+    }
+  ],
+  "links": [
+    {
+      "trace_id": "another-trace-id",
+      "span_id": "another-span-id",
+      "type": "follows_from"
+    }
+  ],
+  "status": {
+    "code": "OK",  // OK, ERROR
+    "message": ""
+  },
+  "resource": {
+    "service.name": "user-service",
+    "service.version": "1.2.3",
+    "service.instance.id": "pod-abc-123",
+    "host.name": "node-5",
+    "k8s.namespace": "production"
+  },
+  "ttl": 1711843200  // 90 days retention
+}
+```
+
+### 3.2 Trace Index (DynamoDB)
+```javascript
+// Trace Index Table (for fast trace lookups)
+{
+  TableName: "TraceIndex",
+  KeySchema: [
+    { AttributeName: "index_key", KeyType: "HASH" },     // Partition key
+    { AttributeName: "trace_id", KeyType: "RANGE" }      // Sort key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: "index_key", AttributeType: "S" },
+    { AttributeName: "trace_id", AttributeType: "S" },
+    { AttributeName: "start_time", AttributeType: "N" }
+  ],
+  GlobalSecondaryIndexes: [
+    {
+      IndexName: "TimeIndex",
+      KeySchema: [
+        { AttributeName: "start_time", KeyType: "HASH" }
+      ]
+    }
+  ],
+  TimeToLiveSpecification: {
+    AttributeName: "ttl",
+    Enabled: true
+  }
+}
+
+// Document Structure (multiple index entries per trace)
+{
+  "index_key": "service:user-service",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "start_time": 1704067200000000,
+  "duration_us": 250000,
+  "span_count": 12,
+  "service_count": 4,
+  "error": false,
+  "root_service": "api-gateway",
+  "root_operation": "GET /api/users",
+  "services": ["api-gateway", "user-service", "auth-service", "db"],
+  "ttl": 1711843200
+}
+
+// Additional index entries:
+// - "operation:GET /api/users" -> trace_id
+// - "error:true" -> trace_id
+// - "duration:slow" -> trace_id (for traces > threshold)
+// - "tag:http.status_code:500" -> trace_id
+```
+
+### 3.3 Trace Aggregations (Redis)
+```
+# Service dependency graph
+trace:dependencies:{service}:{timewindow} -> {
+    upstream: [service1, service2, ...],
+    downstream: [service3, service4, ...],
+    call_counts: {service1: 1234, service2: 567},
+    error_rates: {service1: 0.01, service2: 0.05}
+}
+TTL: 1 hour
+
+# Service latency percentiles
+trace:latency:{service}:{operation}:{timewindow} -> {
+    p50: 50,
+    p95: 150,
+    p99: 450,
+    max: 2000,
+    count: 10000
+}
+TTL: 1 hour
+
+# Error traces
+trace:errors:{service}:{timewindow} -> SET[trace_id1, trace_id2, ...]
+TTL: 24 hours
+```
+
+## 4. Query and Analysis
+
+### 4.1 Trace Query Service
+```java
+public class TraceQueryService {
+    private final DynamoDB dynamoDB;
+    
+    public Trace getTrace(String traceId) {
+        // Get all spans for trace
+        QueryRequest request = new QueryRequest()
+            .withTableName("Spans")
+            .withKeyConditionExpression("trace_id = :traceId")
+            .withExpressionAttributeValues(Map.of(
+                ":traceId", new AttributeValue(traceId)
+            ));
+        
+        QueryResult result = dynamoDB.query(request);
+        
+        List<Span> spans = result.getItems().stream()
+            .map(this::deserializeSpan)
+            .collect(Collectors.toList());
+        
+        return assembleTrace(spans);
+    }
+    
+    public List<Trace> findTraces(TraceQuery query) {
+        // Build index query based on filters
+        String indexKey = buildIndexKey(query);
+        
+        QueryRequest request = new QueryRequest()
+            .withTableName("TraceIndex")
+            .withKeyConditionExpression(
+                "index_key = :key AND start_time BETWEEN :start AND :end"
+            )
+            .withExpressionAttributeValues(Map.of(
+                ":key", new AttributeValue(indexKey),
+                ":start", new AttributeValue().withN(String.valueOf(query.getStartTime())),
+                ":end", new AttributeValue().withN(String.valueOf(query.getEndTime()))
+            ))
+            .withLimit(query.getLimit());
+        
+        QueryResult result = dynamoDB.query(request);
+        
+        // Fetch full traces
+        return result.getItems().stream()
+            .map(item -> item.get("trace_id").getS())
+            .map(this::getTrace)
+            .filter(trace -> matchesFilters(trace, query))
+            .collect(Collectors.toList());
+    }
+    
+    private Trace assembleTrace(List<Span> spans) {
+        // Build span tree
+        Map<String, Span> spanMap = spans.stream()
+            .collect(Collectors.toMap(Span::getSpanId, s -> s));
+        
+        // Find root span
+        Span root = spans.stream()
+            .filter(s -> s.getParentSpanId() == null)
+            .findFirst()
+            .orElse(null);
+        
+        // Calculate trace metrics
+        long minStart = spans.stream()
+            .mapToLong(Span::getStartTime)
+            .min().orElse(0);
+        
+        long maxEnd = spans.stream()
+            .mapToLong(Span::getEndTime)
+            .max().orElse(0);
+        
+        boolean hasErrors = spans.stream()
+            .anyMatch(s -> s.getStatus().isError());
+        
+        return Trace.builder()
+            .traceId(root.getTraceId())
+            .rootSpan(root)
+            .spans(spans)
+            .startTime(minStart)
+            .duration(maxEnd - minStart)
+            .serviceCount(countUniqueServices(spans))
+            .spanCount(spans.size())
+            .hasErrors(hasErrors)
+            .build();
+    }
+}
+```
+
+### 4.2 Service Dependency Analysis
+```java
+public class ServiceDependencyAnalyzer {
+    
+    public ServiceGraph buildServiceGraph(long startTime, long endTime) {
+        // Query all traces in time range
+        List<Trace> traces = traceQuery.findTracesByTimeRange(
+            startTime, 
+            endTime
+        );
+        
+        ServiceGraph graph = new ServiceGraph();
+        
+        for (Trace trace : traces) {
+            // Extract service dependencies from trace
+            for (Span span : trace.getSpans()) {
+                if (span.getKind() == SpanKind.CLIENT && 
+                    span.getParentSpanId() != null) {
+                    
+                    Span parentSpan = trace.getSpan(span.getParentSpanId());
+                    String caller = parentSpan.getServiceName();
+                    String callee = span.getTag("peer.service");
+                    
+                    graph.addEdge(
+                        caller,
+                        callee,
+                        span.getDuration(),
+                        span.getStatus().isError()
+                    );
+                }
+            }
+        }
+        
+        return graph;
+    }
+    
+    public List<ServiceDependency> getServiceDependencies(String serviceName) {
+        ServiceGraph graph = buildServiceGraph(
+            System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1),
+            System.currentTimeMillis()
+        );
+        
+        return graph.getDependencies(serviceName);
+    }
+}
+
+public class ServiceGraph {
+    private Map<String, ServiceNode> nodes = new HashMap<>();
+    private List<ServiceEdge> edges = new ArrayList<>();
+    
+    public void addEdge(
+        String from, 
+        String to, 
+        long duration, 
+        boolean error
+    ) {
+        ServiceNode fromNode = nodes.computeIfAbsent(
+            from, 
+            k -> new ServiceNode(from)
+        );
+        ServiceNode toNode = nodes.computeIfAbsent(
+            to, 
+            k -> new ServiceNode(to)
+        );
+        
+        ServiceEdge edge = new ServiceEdge(fromNode, toNode);
+        edge.recordCall(duration, error);
+        edges.add(edge);
+    }
+    
+    public List<ServiceDependency> getDependencies(String serviceName) {
+        return edges.stream()
+            .filter(e -> e.getFrom().getName().equals(serviceName) ||
+                        e.getTo().getName().equals(serviceName))
+            .map(e -> ServiceDependency.builder()
+                .caller(e.getFrom().getName())
+                .callee(e.getTo().getName())
+                .callCount(e.getCallCount())
+                .errorRate(e.getErrorRate())
+                .avgLatency(e.getAvgLatency())
+                .p95Latency(e.getP95Latency())
+                .build())
+            .collect(Collectors.toList());
+    }
+}
+```
+
+## 5. Integration Points
+
+### 5.1 API Gateway Integration
+```java
+public class TracingFilter implements GatewayFilter {
+    private final Tracer tracer;
+    
+    @Override
+    public void filter(Request request, Response response) {
+        // Extract or create trace context
+        SpanContext parentContext = tracer.extractContext(
+            request.getHeaders()
+        );
+        
+        Span span = parentContext != null 
+            ? tracer.startSpan("gateway.request", parentContext)
+            : tracer.startSpan("gateway.request");
+        
+        // Add HTTP attributes
+        span.setTag("http.method", request.getMethod());
+        span.setTag("http.url", request.getUrl());
+        span.setTag("http.target", request.getPath());
+        span.setTag("http.user_agent", request.getHeader("User-Agent"));
+        
+        // Add custom attributes
+        span.setTag("user.id", extractUserId(request));
+        span.setTag("tenant.id", extractTenantId(request));
+        
+        // Store span in request context
+        request.setAttribute("trace.span", span);
+        
+        try {
+            // Execute request
+            response = chain.proceed(request);
+            
+            span.setTag("http.status_code", response.getStatusCode());
+            
+            if (response.getStatusCode() >= 500) {
+                span.setStatus(SpanStatus.ERROR);
+            }
+            
+            span.finish();
+        } catch (Exception e) {
+            span.recordException(e);
+            span.setStatus(SpanStatus.ERROR);
+            span.finish();
+            throw e;
+        }
+    }
+}
+```
+
+### 5.2 Service Mesh Integration
+```yaml
+# Istio/Envoy Tracing Configuration
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  meshConfig:
+    enableTracing: true
+    defaultConfig:
+      tracing:
+        sampling: 1.0  # 100% sampling (adjust based on needs)
+        zipkin:
+          address: tracing-collector.observability:9411
+        openCensusAgent:
+          address: tracing-collector.observability:55678
+          context: 
+            - W3C_TRACE_CONTEXT
+            - GRPC_TRACE_BIN
+            - CLOUD_TRACE_CONTEXT
+            - B3_MULTI_HEADER
+```
+
+### 5.3 Database Instrumentation
+```java
+@Aspect
+public class DatabaseTracingAspect {
+    private final Tracer tracer;
+    
+    @Around("execution(* javax.sql.DataSource.getConnection(..))")
+    public Object traceConnection(ProceedingJoinPoint joinPoint) 
+        throws Throwable {
+        
+        Span span = tracer.startSpan("db.connection", SpanKind.CLIENT);
+        span.setTag("db.system", getDatabaseSystem());
+        
+        try {
+            Connection connection = (Connection) joinPoint.proceed();
+            return new TracedConnection(connection, tracer);
+        } finally {
+            span.finish();
+        }
+    }
+}
+
+public class TracedConnection implements Connection {
+    private final Connection delegate;
+    private final Tracer tracer;
+    
+    @Override
+    public Statement createStatement() throws SQLException {
+        Span span = tracer.startSpan("db.statement", SpanKind.CLIENT);
+        span.setTag("db.system", "postgresql");
+        
+        try {
+            Statement statement = delegate.createStatement();
+            return new TracedStatement(statement, tracer);
+        } finally {
+            span.finish();
+        }
+    }
+}
+
+public class TracedStatement implements Statement {
+    private final Statement delegate;
+    private final Tracer tracer;
+    
+    @Override
+    public ResultSet executeQuery(String sql) throws SQLException {
+        Span span = tracer.startSpan("db.query", SpanKind.CLIENT);
+        span.setTag("db.statement", sanitizeSql(sql));
+        span.setTag("db.operation", "SELECT");
+        
+        long startTime = System.nanoTime();
+        
+        try {
+            ResultSet result = delegate.executeQuery(sql);
+            long duration = System.nanoTime() - startTime;
+            
+            span.setTag("db.duration_ms", duration / 1_000_000);
+            span.finish();
+            
+            return result;
+        } catch (SQLException e) {
+            span.recordException(e);
+            span.setStatus(SpanStatus.ERROR);
+            span.finish();
+            throw e;
+        }
+    }
+}
+```
+
+## 6. Performance Optimizations
+
+### 6.1 Span Batching
+```java
+public class BatchingSpanExporter {
+    private final Queue<Span> buffer = new ConcurrentLinkedQueue<>();
+    private final int batchSize = 100;
+    private final Duration batchTimeout = Duration.ofSeconds(5);
+    
+    public void export(Span span) {
+        buffer.offer(span);
+        
+        if (buffer.size() >= batchSize) {
+            flush();
+        }
+    }
+    
+    @Scheduled(fixedDelay = 5000)
+    public void flush() {
+        List<Span> batch = new ArrayList<>();
+        
+        Span span;
+        while ((span = buffer.poll()) != null && batch.size() < batchSize) {
+            batch.add(span);
+        }
+        
+        if (!batch.isEmpty()) {
+            exportBatch(batch);
+        }
+    }
+    
+    private void exportBatch(List<Span> spans) {
+        // Export to collector via gRPC
+        traceService.export(ExportTraceServiceRequest.newBuilder()
+            .addAllResourceSpans(convertSpans(spans))
+            .build()
+        );
+    }
+}
+```
+
+### 6.2 Sampling Cache
+```java
+public class SamplingCache {
+    private final Cache<String, Boolean> cache;
+    
+    public SamplingCache() {
+        this.cache = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(Duration.ofMinutes(5))
+            .build();
+    }
+    
+    public boolean shouldSample(String traceId, Supplier<Boolean> sampler) {
+        return cache.get(traceId, key -> sampler.get());
+    }
+}
+```
+
+### 6.3 Trace Assembly Optimization
+```java
+public class OptimizedTraceAssembler {
+    
+    public Trace assembleTrace(String traceId) {
+        // Parallel span fetching
+        CompletableFuture<List<Span>> spansFuture = 
+            CompletableFuture.supplyAsync(() -> fetchSpans(traceId));
+        
+        CompletableFuture<TraceMetadata> metadataFuture = 
+            CompletableFuture.supplyAsync(() -> fetchMetadata(traceId));
+        
+        // Wait for both
+        List<Span> spans = spansFuture.join();
+        TraceMetadata metadata = metadataFuture.join();
+        
+        // Build trace
+        return buildTrace(traceId, spans, metadata);
+    }
+}
+```
+
+## 7. Monitoring and Observability
+
+### 7.1 Tracing System Metrics
+```
+# Span ingestion
+trace_spans_received_total{protocol}
+trace_spans_processed_total{status}
+trace_spans_dropped_total{reason}
+trace_span_processing_duration_seconds
+
+# Sampling
+trace_sampling_decisions_total{decision, strategy}
+trace_sampling_rate{service}
+
+# Storage
+trace_storage_write_duration_seconds
+trace_storage_size_bytes
+trace_spans_stored_total
+
+# Query performance
+trace_query_duration_seconds{query_type}
+trace_query_results{query_type}
+
+# System health
+trace_collector_cpu_utilization
+trace_collector_memory_utilization
+trace_collector_buffer_size
+```
+
+### 7.2 Alerting
+```yaml
+alerts:
+  - name: HighSpanDropRate
+    condition: |
+      rate(trace_spans_dropped_total[5m]) > 100
+    severity: warning
+    description: High rate of dropped spans
+    
+  - name: CollectorDown
+    condition: |
+      up{job="trace-collector"} == 0
+    severity: critical
+    description: Trace collector is down
+    
+  - name: SlowTraceQuery
+    condition: |
+      histogram_quantile(0.95, 
+        trace_query_duration_seconds{query_type="find_traces"}) > 5
+    severity: warning
+    description: Slow trace queries detected
+    
+  - name: HighErrorRate
+    condition: |
+      rate(trace_spans_processed_total{status="error"}[5m]) > 50
+    severity: warning
+    description: High span processing error rate
+```
+
+## 8. Configuration
+
+### 8.1 Collector Configuration
+```yaml
+tracing:
+  collector:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:14250
+          thrift_http:
+            endpoint: 0.0.0.0:14268
+      zipkin:
+        endpoint: 0.0.0.0:9411
+        
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 100
+        send_batch_max_size: 1000
+        
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+        spike_limit_mib: 128
+        
+      attributes:
+        actions:
+          - key: environment
+            value: production
+            action: insert
+            
+    exporters:
+      dynamodb:
+        table_name: Spans
+        region: us-east-1
+        
+      metrics:
+        prometheus:
+          endpoint: 0.0.0.0:8888
+          
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp, jaeger, zipkin]
+          processors: [memory_limiter, batch, attributes]
+          exporters: [dynamodb, metrics]
+```
+
+### 8.2 SDK Configuration
+```yaml
+tracing:
+  sdk:
+    enabled: true
+    
+    sampling:
+      strategy: parent_based
+      root_sampler:
+        type: probabilistic
+        rate: 0.1  # 10% sampling
+        
+    exporters:
+      otlp:
+        endpoint: http://trace-collector:4318
+        timeout: 10s
+        compression: gzip
+        
+    resource:
+      attributes:
+        service.name: ${SERVICE_NAME}
+        service.version: ${SERVICE_VERSION}
+        deployment.environment: ${ENVIRONMENT}
+        
+    instrumentation:
+      http:
+        enabled: true
+        capture_headers: true
+        capture_body: false
+      database:
+        enabled: true
+        capture_statement: true
+        sanitize_statement: true
+      messaging:
+        enabled: true
+      cache:
+        enabled: true
+```
+
+This completes the Distributed Tracing Component Design. Would you like me to continue with the Monitoring Component Design next?
