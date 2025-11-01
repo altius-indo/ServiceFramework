@@ -51,6 +51,7 @@ dependencies {
     // Jackson
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.15.3")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.15.3")
+    implementation("com.google.code.gson:gson:2.10.1")
     
     // Testing
     testImplementation("io.vertx:vertx-junit5:4.5.0")
