@@ -10,13 +10,24 @@ import io.vertx.ext.web.handler.TimeoutHandler
 import io.vertx.kotlin.coroutines.await
 
 /**
- * HTTP Server Verticle
- * Handles all HTTP requests and routing
+ * A verticle responsible for setting up and running the HTTP server.
+ *
+ * This class handles all aspects of the HTTP server, including the
+ * configuration of middleware, the definition of routes, and the
+- * initialization of the server itself. It serves as the main entry
++ * initialization of the server itself. It serves as the main entry.
  */
 class HttpServerVerticle : BaseVerticle() {
 
     private lateinit var router: Router
 
+    /**
+     * Initializes the HTTP server by setting up middleware, routes, and
+     * starting the server.
+     *
+     * This method is the main entry point for the verticle's logic and is
+     * called during the verticle's startup sequence.
+     */
     override suspend fun initialize() {
         router = Router.router(vertx)
 
@@ -85,6 +96,12 @@ class HttpServerVerticle : BaseVerticle() {
         logger.info { "HTTP server started on $host:$port" }
     }
 
+    /**
+     * Performs cleanup tasks when the verticle is undeployed.
+     *
+     * In this implementation, this method logs a cleanup message. It can be
+     * expanded to include logic for gracefully shutting down server resources.
+     */
     override suspend fun cleanup() {
         logger.info { "Cleaning up HTTP server..." }
     }

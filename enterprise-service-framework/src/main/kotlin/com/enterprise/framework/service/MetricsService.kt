@@ -13,7 +13,13 @@ import mu.KotlinLogging
 private val logger = KotlinLogging.logger {}
 
 /**
- * Metrics service for application monitoring
+ * A service for collecting and managing application metrics.
+ *
+ * This service provides a simple interface for recording various types of metrics,
+ * such as counters and timers, which are essential for monitoring the health and
+ * performance of the application.
+ *
+ * @property vertx The Vert.x instance.
  */
 class MetricsService(private val vertx: Vertx) {
 
@@ -25,6 +31,12 @@ class MetricsService(private val vertx: Vertx) {
         registry = BackendRegistries.getDefaultNow() ?: SimpleMeterRegistry()
     }
 
+    /**
+     * Increments a counter metric.
+     *
+     * @param name The name of the counter.
+     * @param tags A map of tags to associate with the metric for dimensionality.
+     */
     fun incrementCounter(name: String, tags: Map<String, String> = emptyMap()) {
         val counter = Counter.builder(name)
             .apply {
@@ -38,6 +50,13 @@ class MetricsService(private val vertx: Vertx) {
         logger.debug { "Incremented counter: $name" }
     }
 
+    /**
+     * Records a time-based metric.
+     *
+     * @param name The name of the timer.
+     * @param durationMs The duration to record, in milliseconds.
+     * @param tags A map of tags to associate with the metric.
+     */
     fun recordTime(name: String, durationMs: Long, tags: Map<String, String> = emptyMap()) {
         val timer = Timer.builder(name)
             .apply {
@@ -51,6 +70,15 @@ class MetricsService(private val vertx: Vertx) {
         logger.debug { "Recorded timer: $name with duration $durationMs ms" }
     }
 
+    /**
+     * Measures the execution time of a block of code and records it as a timer metric.
+     *
+     * @param T The return type of the code block.
+     * @param name The name of the timer.
+     * @param tags A map of tags to associate with the metric.
+     * @param block The block of code to execute and measure.
+     * @return The result of the executed block.
+     */
     fun <T> measureTime(name: String, tags: Map<String, String> = emptyMap(), block: () -> T): T {
         val startTime = System.currentTimeMillis()
         return try {
@@ -61,6 +89,17 @@ class MetricsService(private val vertx: Vertx) {
         }
     }
 
+    /**
+     * Measures the execution time of a suspendable block of code and records it as a timer metric.
+     *
+     * This version of `measureTime` is designed for use with coroutines.
+     *
+     * @param T The return type of the code block.
+     * @param name The name of the timer.
+     * @param tags A map of tags to associate with the metric.
+     * @param block The suspendable block of code to execute and measure.
+     * @return The result of the executed block.
+     */
     suspend fun <T> measureTimeSuspend(
         name: String,
         tags: Map<String, String> = emptyMap(),
@@ -75,11 +114,27 @@ class MetricsService(private val vertx: Vertx) {
         }
     }
 
+    /**
+     * Returns the underlying [MeterRegistry] instance.
+     *
+     * This can be used to access more advanced features of the Micrometer library.
+     *
+     * @return The [MeterRegistry] used by this service.
+     */
     fun getRegistry(): MeterRegistry {
         return registry
     }
 
     companion object {
+        /**
+         * Creates a new instance of [MetricsService] with Prometheus metrics enabled.
+         *
+         * This factory method configures the service to expose metrics in the Prometheus
+         * format via an embedded HTTP server.
+         *
+         * @param vertx The Vert.x instance.
+         * @return A new `MetricsService` instance configured for Prometheus.
+         */
         fun createWithPrometheus(vertx: Vertx): MetricsService {
             val options = MicrometerMetricsOptions()
                 .setPrometheusOptions(
