@@ -11,14 +11,29 @@ import mu.KotlinLogging
 private val logger = KotlinLogging.logger {}
 
 /**
- * Configuration loader for the application
- * Loads configuration from multiple sources with the following precedence:
+ * Handles the loading of application configuration from various sources.
+ *
+ * This class provides a centralized mechanism for loading configuration settings.
+ * It follows a hierarchical approach, allowing for overrides from different
+ * environments. The order of precedence for loading configurations is:
  * 1. Environment variables (highest priority)
  * 2. System properties
- * 3. application.conf file (lowest priority)
+ * 3. `application.json` file (lowest priority)
+ *
+ * @property vertx The Vert.x instance used for asynchronous operations.
  */
 class ConfigLoader(private val vertx: Vertx) {
 
+    /**
+     * Asynchronously loads the application configuration from all configured sources.
+     *
+     * This method combines settings from the `application.json` file, system properties,
+     * and environment variables into a single `JsonObject`. It logs the result
+     * upon successful loading or logs an error if the process fails.
+     *
+     * @return A `JsonObject` containing the merged application configuration.
+     * @throws Exception if the configuration cannot be loaded.
+     */
     suspend fun loadConfig(): JsonObject {
         logger.info { "Loading application configuration..." }
 
@@ -51,6 +66,16 @@ class ConfigLoader(private val vertx: Vertx) {
         }
     }
 
+    /**
+     * Extracts and constructs a [ServerConfig] object from the provided configuration.
+     *
+     * This method retrieves the server-related settings from the main configuration
+     * `JsonObject` and uses them to create a `ServerConfig` data class instance.
+     * It provides default values for any missing server settings.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return A `ServerConfig` instance populated with the server settings.
+     */
     fun getServerConfig(config: JsonObject): ServerConfig {
         val serverConfig = config.getJsonObject("server") ?: JsonObject()
         return ServerConfig(
@@ -60,6 +85,16 @@ class ConfigLoader(private val vertx: Vertx) {
         )
     }
 
+    /**
+     * Extracts and constructs a [DatabaseConfig] object from the provided configuration.
+     *
+     * This method retrieves the DynamoDB-related settings from the main configuration
+     * `JsonObject` and uses them to create a `DatabaseConfig` data class instance.
+     * It provides default values for any missing database settings.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return A `DatabaseConfig` instance populated with the database settings.
+     */
     fun getDatabaseConfig(config: JsonObject): DatabaseConfig {
         val dbConfig = config.getJsonObject("database")?.getJsonObject("dynamodb") ?: JsonObject()
         return DatabaseConfig(
@@ -69,6 +104,16 @@ class ConfigLoader(private val vertx: Vertx) {
         )
     }
 
+    /**
+     * Extracts and constructs a [RedisConfig] object from the provided configuration.
+     *
+     * This method retrieves the Redis-related settings from the main configuration
+     * `JsonObject` and uses them to create a `RedisConfig` data class instance.
+     * It provides default values for any missing Redis settings.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return A `RedisConfig` instance populated with the Redis settings.
+     */
     fun getRedisConfig(config: JsonObject): RedisConfig {
         val redisConfig = config.getJsonObject("redis") ?: JsonObject()
         return RedisConfig(

@@ -12,6 +12,16 @@ import mu.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
 
+/**
+ * The main entry point for the Enterprise Service Framework application.
+ *
+ * This function initializes and configures the Vert.x instance, loads the application
+ * configuration, deploys the necessary verticles (such as the HTTP server),
+ * and sets up a graceful shutdown hook. The application will continue running
+ * until it is terminated.
+ *
+ * @param args Command-line arguments passed to the application.
+ */
 fun main(args: Array<String>) {
     runBlocking {
         logger.info { "Starting Enterprise Service Framework..." }

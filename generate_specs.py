@@ -610,7 +610,7 @@ class SpecificationGenerator:
         print(f"Generating {filename.name}...")
         
         # Content from the file we created earlier
-        with open("/home/claude/deployment-architectures.md", "r") as f:
+        with open("specs/deployment-architectures.md", "r") as f:
             content = f.read()
         
         self._write_file(filename, content)
@@ -621,7 +621,7 @@ class SpecificationGenerator:
         print(f"Generating {filename.name}...")
         
         # Content from the file we created earlier
-        with open("/home/claude/disaster-recovery.md", "r") as f:
+        with open("specs/disaster-recovery.md", "r") as f:
             content = f.read()
         
         self._write_file(filename, content)
@@ -632,7 +632,7 @@ class SpecificationGenerator:
         print(f"Generating {filename.name}...")
         
         # Content from the file we created earlier
-        with open("/home/claude/api-specifications.md", "r") as f:
+        with open("specs/api-specifications.md", "r") as f:
             content = f.read()
         
         self._write_file(filename, content)
@@ -1279,6 +1279,25 @@ Generator: Technical Specification Generator v1.0
 ---
 
 """
+        # If the file already exists, remove the old header
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+
+            # Find the end of the header
+            header_end = -1
+            if len(lines) > 2 and lines[0].strip() == "---":
+                for i, line in enumerate(lines[1:]):
+                    if line.strip() == "---":
+                        header_end = i + 2
+                        break
+
+            # If a header was found, remove it
+            if header_end != -1:
+                content_without_header = "".join(lines[header_end:])
+                if content_without_header.strip() != "":
+                    content = content_without_header
+
         with open(filename, 'w') as f:
             f.write(metadata + content)
         print(f"  ✓ {filename.name} created successfully")
