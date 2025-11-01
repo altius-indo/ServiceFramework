@@ -24,7 +24,7 @@ private val logger = KotlinLogging.logger {}
  * @property tableSchema The schema definition for the DynamoDB table.
  * @property entityClass The class of the entity, used for logging purposes.
  */
-class DynamoDbRepository<T>(
+open class DynamoDbRepository<T>(
     private val config: DatabaseConfig,
     private val tableSchema: TableSchema<T>,
     private val entityClass: Class<T>
