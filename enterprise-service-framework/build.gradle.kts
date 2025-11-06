@@ -52,7 +52,15 @@ dependencies {
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.15.3")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.15.3")
     implementation("com.google.code.gson:gson:2.10.1")
-    
+
+    // Security & Cryptography
+    implementation("de.mkammerer:argon2-jvm:2.11")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.77")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.77")
+
+    // Rate Limiting
+    implementation("com.github.vladimir-bukhtoyarov:bucket4j-core:8.7.0")
+
     // Testing
     testImplementation("io.vertx:vertx-junit5:4.5.0")
     testImplementation("io.kotest:kotest-runner-junit5:5.8.0")

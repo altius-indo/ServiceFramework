@@ -19,7 +19,41 @@
     "jwt": {
       "secret": "change-this-secret-in-production",
       "issuer": "enterprise-framework",
-      "expirationSeconds": 3600
+      "accessTokenExpirationSeconds": 3600,
+      "refreshTokenExpirationSeconds": 604800,
+      "algorithm": "HS256"
+    },
+    "password": {
+      "minLength": 12,
+      "requireUppercase": true,
+      "requireLowercase": true,
+      "requireDigit": true,
+      "requireSpecialChar": true,
+      "preventReuse": 5
+    },
+    "session": {
+      "absoluteTimeoutSeconds": 86400,
+      "idleTimeoutSeconds": 3600,
+      "maxConcurrentSessions": 5,
+      "renewOnActivity": true
+    },
+    "rateLimiting": {
+      "enabled": true,
+      "maxRequests": 10,
+      "windowSeconds": 60,
+      "blacklistDurationSeconds": 300
+    },
+    "bruteForce": {
+      "enabled": true,
+      "maxFailedAttempts": 5,
+      "lockoutDurationSeconds": 900,
+      "resetAfterSuccessfulLogin": true
+    },
+    "mfa": {
+      "enabled": true,
+      "issuer": "Enterprise Framework",
+      "totpWindowSize": 1,
+      "enforced": false
     }
   },
   "circuit-breaker": {
