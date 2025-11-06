@@ -1,7 +1,7 @@
 package com.enterprise.framework
 
 import com.enterprise.framework.config.ConfigLoader
-import com.enterprise.framework.verticle.HttpServerVerticle
+import com.enterprise.framework.verticle.EnhancedHttpServerVerticle
 import io.vertx.core.DeploymentOptions
 import io.vertx.core.Vertx
 import io.vertx.core.VertxOptions
@@ -40,17 +40,17 @@ fun main(args: Array<String>) {
             // Deploy verticles
             logger.info { "Deploying verticles..." }
 
-            // Deploy HTTP Server Verticle
+            // Deploy Enhanced HTTP Server Verticle with Authentication
             val httpServerDeploymentOptions = DeploymentOptions()
                 .setConfig(config)
-                .setInstances(Runtime.getRuntime().availableProcessors())
+                .setInstances(1) // Single instance due to Redis/DynamoDB initialization
 
             val httpServerId = vertx.deployVerticle(
-                HttpServerVerticle::class.java.name,
+                EnhancedHttpServerVerticle::class.java.name,
                 httpServerDeploymentOptions
             ).await()
 
-            logger.info { "HTTP Server Verticle deployed: $httpServerId" }
+            logger.info { "Enhanced HTTP Server Verticle deployed: $httpServerId" }
 
             logger.info { "Enterprise Service Framework started successfully" }
             logger.info { "Server is listening on ${config.getJsonObject("server")?.getString("host")}:${config.getJsonObject("server")?.getInteger("port")}" }
