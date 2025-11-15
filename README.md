@@ -34,19 +34,17 @@ The generated documents will be placed in the `specs` directory. For a detailed 
 
 ### Local Development
 
-1.  **Set up the project:**
+1.  **Navigate to the framework directory:**
     ```bash
-    ./project_setup.sh
+    cd enterprise-service-framework
     ```
-2.  **Start local services:**
-    ```bash
-    ./scripts/setup-local.sh
-    ```
-3.  **Build and run the application:**
+
+2.  **Build and run the application:**
     ```bash
     ./gradlew run
     ```
-4.  **Access the API:**
+
+3.  **Access the API:**
     ```bash
     curl http://localhost:8080/health
     ```
@@ -56,6 +54,7 @@ The generated documents will be placed in the `specs` directory. For a detailed 
 To run the application using Docker Compose:
 
 ```bash
+cd enterprise-service-framework
 docker-compose -f docker/docker-compose.yml up
 ```
 
@@ -64,7 +63,8 @@ docker-compose -f docker/docker-compose.yml up
 To deploy the application to a Kubernetes cluster:
 
 ```bash
-./scripts/deploy.sh
+cd enterprise-service-framework
+kubectl apply -f k8s/
 ```
 
 ## Project Structure
@@ -74,11 +74,11 @@ To deploy the application to a Kubernetes cluster:
 ├── enterprise-service-framework/ # The main application source code
 │   ├── src/main/kotlin/          # Application source code
 │   ├── src/main/resources/       # Configuration files
-│   └── src/test/kotlin/          # Test files
+│   ├── src/test/kotlin/          # Test files
+│   ├── docker/                   # Docker configurations
+│   ├── k8s/                      # Kubernetes manifests
+│   └── scripts/                  # Utility scripts
 ├── specs/                        # Technical specification documents
-├── docker/                       # Docker configurations
-├── k8s/                          # Kubernetes manifests
-├── scripts/                      # Utility scripts
 ├── generate_specs.py             # Script for generating specifications
 └── project_setup.sh              # Script for initial project setup
 ```
@@ -97,6 +97,7 @@ To deploy the application to a Kubernetes cluster:
 To build the application, run:
 
 ```bash
+cd enterprise-service-framework
 ./gradlew build
 ```
 
@@ -105,6 +106,7 @@ To build the application, run:
 To run the test suite, run:
 
 ```bash
+cd enterprise-service-framework
 ./gradlew test
 ```
 
@@ -113,12 +115,13 @@ To run the test suite, run:
 To run the application locally, use:
 
 ```bash
+cd enterprise-service-framework
 ./gradlew run
 ```
 
 ## Configuration
 
-The application's configuration is loaded from `src/main/resources/application.conf`.
+The application's configuration is loaded from `enterprise-service-framework/src/main/resources/application.json`.
 
 **Key configuration sections:**
 
@@ -127,20 +130,18 @@ The application's configuration is loaded from `src/main/resources/application.c
 *   Authentication (JWT secrets)
 *   Logging levels
 
-## API Documentation
+## Documentation
 
-The OpenAPI specification for the API can be found at `docs/api/openapi.yaml`.
-
-## Architecture
-
-For a detailed overview of the system's architecture, please see `docs/architecture/diagrams/system-overview.md`.
+*   **Specifications**: See the `specs/` directory for detailed requirements and design documents
+*   **Index**: `specs/INDEX.md` - Complete documentation index
+*   **Quick Reference**: `specs/QUICK-REFERENCE.md` - Fast access to key information
 
 ## Contributing
 
-1.  Fork the repository.
-2.  Create a feature branch.
-3.  Make your changes.
-4.  Submit a pull request.
+1.  Fork the repository
+2.  Create a feature branch
+3.  Make your changes
+4.  Submit a pull request
 
 ## License
 

@@ -5,7 +5,6 @@ import com.enterprise.framework.verticle.EnhancedHttpServerVerticle
 import io.vertx.core.DeploymentOptions
 import io.vertx.core.Vertx
 import io.vertx.core.VertxOptions
-import io.vertx.core.json.JsonObject
 import io.vertx.kotlin.coroutines.await
 import kotlinx.coroutines.runBlocking
 import mu.KotlinLogging
@@ -22,7 +21,7 @@ private val logger = KotlinLogging.logger {}
  *
  * @param args Command-line arguments passed to the application.
  */
-fun main(args: Array<String>) {
+fun main(args: Array<String>): Unit {
     runBlocking {
         logger.info { "Starting Enterprise Service Framework..." }
 
