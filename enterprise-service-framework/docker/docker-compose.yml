@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: enterprise-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - enterprise-network
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    container_name: enterprise-dynamodb
+    ports:
+      - "8000:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - enterprise-network
+
+  # Application service (optional - uncomment to run in Docker)
+  # app:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile
+  #   container_name: enterprise-app
+  #   ports:
+  #     - "8080:8080"
+  #     - "8081:8081"
+  #   environment:
+  #     - REDIS_HOST=redis
+  #     - REDIS_PORT=6379
+  #     - DYNAMODB_ENDPOINT=http://dynamodb:8000
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #     dynamodb:
+  #       condition: service_healthy
+  #   networks:
+  #     - enterprise-network
+
+volumes:
+  redis-data:
+    driver: local
+  dynamodb-data:
+    driver: local
+
+networks:
+  enterprise-network:
+    driver: bridge

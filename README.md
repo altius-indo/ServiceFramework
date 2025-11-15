@@ -32,33 +32,100 @@ The generated documents will be placed in the `specs` directory. For a detailed 
 
 ## Quick Start
 
-### Local Development
+### Prerequisites
 
-1.  **Navigate to the framework directory:**
-    ```bash
-    cd enterprise-service-framework
-    ```
+*   **JDK 17+** - For running the Kotlin/Java application
+*   **Gradle 8.4+** - Build automation (wrapper included)
+*   **Docker & Docker Compose** - For running dependencies (Redis, DynamoDB)
 
-2.  **Build and run the application:**
-    ```bash
-    ./gradlew run
-    ```
+### Setup and Run
 
-3.  **Access the API:**
-    ```bash
-    curl http://localhost:8080/health
-    ```
+#### 1. Start Dependencies
 
-### Docker Compose
-
-To run the application using Docker Compose:
+The application requires Redis and DynamoDB. Start them using Docker Compose:
 
 ```bash
 cd enterprise-service-framework
+docker-compose -f docker/docker-compose.yml up -d
+```
+
+This will start:
+- **Redis** on port `6379` (session/cache storage)
+- **DynamoDB Local** on port `8000` (database)
+
+Verify services are running:
+```bash
+docker ps
+```
+
+#### 2. Build and Run the Application
+
+```bash
+cd enterprise-service-framework
+./gradlew run
+```
+
+The application will start on `http://localhost:8080`
+
+#### 3. Verify the Service
+
+Test the health endpoint:
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
+```json
+{
+  "status": "UP",
+  "checks": [
+    {"id": "database", "status": "UP"},
+    {"id": "redis", "status": "UP"}
+  ],
+  "outcome": "UP"
+}
+```
+
+### Available Endpoints
+
+Once running, the following endpoints are available:
+
+**Health Checks:**
+- `GET /health` - Overall health status
+- `GET /ready` - Readiness probe
+- `GET /live` - Liveness probe
+
+**Authentication:**
+- `POST /auth/login` - User login
+- `POST /auth/refresh` - Refresh access token
+- `POST /auth/logout` - Logout (protected)
+- `GET /auth/sessions` - List active sessions (protected)
+- `DELETE /auth/sessions/:sessionId` - Terminate session (protected)
+- `POST /auth/introspect` - Token introspection
+
+**API:**
+- `/api/v1/*` - Protected API endpoints
+
+### Stopping the Services
+
+Stop the application with `Ctrl+C`, then stop Docker services:
+
+```bash
+cd enterprise-service-framework
+docker-compose -f docker/docker-compose.yml down
+```
+
+### Docker Compose Only
+
+To run everything (app + dependencies) in Docker:
+
+```bash
+cd enterprise-service-framework
+# Uncomment the 'app' service in docker/docker-compose.yml first
 docker-compose -f docker/docker-compose.yml up
 ```
 
-### Kubernetes
+### Kubernetes Deployment
 
 To deploy the application to a Kubernetes cluster:
 
@@ -85,39 +152,52 @@ kubectl apply -f k8s/
 
 ## Development
 
-### Prerequisites
-
-*   JDK 17+
-*   Gradle 8.4+
-*   Docker
-*   `kubectl` (for Kubernetes deployment)
-
 ### Building
 
-To build the application, run:
+Build the application without running it:
 
 ```bash
 cd enterprise-service-framework
 ./gradlew build
 ```
 
+The build creates:
+- Standard JAR: `build/libs/enterprise-service-framework-1.0.0-SNAPSHOT.jar`
+- Fat JAR (with dependencies): `build/libs/enterprise-service-framework-1.0.0-SNAPSHOT-all.jar`
+
 ### Testing
 
-To run the test suite, run:
+Run the test suite:
 
 ```bash
 cd enterprise-service-framework
 ./gradlew test
 ```
 
-### Running Locally
+### Running in Development Mode
 
-To run the application locally, use:
+For development with auto-reload (requires dependencies running):
 
 ```bash
 cd enterprise-service-framework
-./gradlew run
+./gradlew run --continuous
 ```
+
+### Gradle Tasks
+
+View all available Gradle tasks:
+
+```bash
+cd enterprise-service-framework
+./gradlew tasks
+```
+
+Common tasks:
+- `./gradlew clean` - Clean build artifacts
+- `./gradlew build` - Build the project
+- `./gradlew test` - Run tests
+- `./gradlew run` - Run the application
+- `./gradlew shadowJar` - Create fat JAR
 
 ## Configuration
 
@@ -135,6 +215,68 @@ The application's configuration is loaded from `enterprise-service-framework/src
 *   **Specifications**: See the `specs/` directory for detailed requirements and design documents
 *   **Index**: `specs/INDEX.md` - Complete documentation index
 *   **Quick Reference**: `specs/QUICK-REFERENCE.md` - Fast access to key information
+
+## Troubleshooting
+
+### Port Already in Use
+
+If you see "Address already in use" error:
+
+```bash
+# Find process using port 8080
+lsof -i :8080
+
+# Kill the process (replace PID with actual process ID)
+kill <PID>
+```
+
+### Docker Services Not Starting
+
+Check Docker services status:
+
+```bash
+docker-compose -f enterprise-service-framework/docker/docker-compose.yml ps
+```
+
+View logs:
+
+```bash
+docker-compose -f enterprise-service-framework/docker/docker-compose.yml logs
+```
+
+Restart services:
+
+```bash
+docker-compose -f enterprise-service-framework/docker/docker-compose.yml restart
+```
+
+### Connection Refused to Redis/DynamoDB
+
+Ensure Docker services are running:
+
+```bash
+docker ps | grep enterprise
+```
+
+You should see:
+- `enterprise-redis`
+- `enterprise-dynamodb`
+
+If not running, start them:
+
+```bash
+cd enterprise-service-framework
+docker-compose -f docker/docker-compose.yml up -d
+```
+
+### Build Failures
+
+Clean and rebuild:
+
+```bash
+cd enterprise-service-framework
+./gradlew clean build
+```
 
 ## Contributing
 
