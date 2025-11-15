@@ -122,4 +122,100 @@ class ConfigLoader(private val vertx: Vertx) {
             password = redisConfig.getString("password")
         )
     }
+
+    /**
+     * Extracts JWT configuration from the provided configuration.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return JWT configuration settings
+     */
+    fun getJwtConfig(config: JsonObject): com.enterprise.framework.model.JwtConfig {
+        val authConfig = config.getJsonObject("auth") ?: JsonObject()
+        val jwtConfig = authConfig.getJsonObject("jwt") ?: JsonObject()
+
+        return com.enterprise.framework.model.JwtConfig(
+            secret = jwtConfig.getString("secret", "change-this-secret-in-production"),
+            issuer = jwtConfig.getString("issuer", "enterprise-framework"),
+            accessTokenExpirationSeconds = jwtConfig.getLong("accessTokenExpirationSeconds", 3600L),
+            refreshTokenExpirationSeconds = jwtConfig.getLong("refreshTokenExpirationSeconds", 604800L),
+            algorithm = jwtConfig.getString("algorithm", "HS256"),
+            publicKey = jwtConfig.getString("publicKey"),
+            privateKey = jwtConfig.getString("privateKey")
+        )
+    }
+
+    /**
+     * Extracts password policy configuration from the provided configuration.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return Password policy configuration
+     */
+    fun getPasswordPolicy(config: JsonObject): com.enterprise.framework.model.PasswordPolicy {
+        val authConfig = config.getJsonObject("auth") ?: JsonObject()
+        val passwordConfig = authConfig.getJsonObject("password") ?: JsonObject()
+
+        return com.enterprise.framework.model.PasswordPolicy(
+            minLength = passwordConfig.getInteger("minLength", 12),
+            requireUppercase = passwordConfig.getBoolean("requireUppercase", true),
+            requireLowercase = passwordConfig.getBoolean("requireLowercase", true),
+            requireDigit = passwordConfig.getBoolean("requireDigit", true),
+            requireSpecialChar = passwordConfig.getBoolean("requireSpecialChar", true),
+            preventReuse = passwordConfig.getInteger("preventReuse", 5),
+            expirationDays = passwordConfig.getInteger("expirationDays")
+        )
+    }
+
+    /**
+     * Extracts session configuration from the provided configuration.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return Session configuration
+     */
+    fun getSessionConfig(config: JsonObject): com.enterprise.framework.model.SessionConfig {
+        val authConfig = config.getJsonObject("auth") ?: JsonObject()
+        val sessionConfig = authConfig.getJsonObject("session") ?: JsonObject()
+
+        return com.enterprise.framework.model.SessionConfig(
+            absoluteTimeoutSeconds = sessionConfig.getLong("absoluteTimeoutSeconds", 86400L),
+            idleTimeoutSeconds = sessionConfig.getLong("idleTimeoutSeconds", 3600L),
+            maxConcurrentSessions = sessionConfig.getInteger("maxConcurrentSessions", 5),
+            renewOnActivity = sessionConfig.getBoolean("renewOnActivity", true)
+        )
+    }
+
+    /**
+     * Extracts rate limiting configuration from the provided configuration.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return Rate limiting configuration
+     */
+    fun getRateLimitingConfig(config: JsonObject): com.enterprise.framework.model.RateLimitingConfig {
+        val authConfig = config.getJsonObject("auth") ?: JsonObject()
+        val rateLimitConfig = authConfig.getJsonObject("rateLimiting") ?: JsonObject()
+
+        return com.enterprise.framework.model.RateLimitingConfig(
+            enabled = rateLimitConfig.getBoolean("enabled", true),
+            maxRequests = rateLimitConfig.getInteger("maxRequests", 10),
+            windowSeconds = rateLimitConfig.getLong("windowSeconds", 60L),
+            blacklistDurationSeconds = rateLimitConfig.getLong("blacklistDurationSeconds", 300L)
+        )
+    }
+
+    /**
+     * Extracts brute force protection configuration from the provided configuration.
+     *
+     * @param config The application's configuration `JsonObject`.
+     * @return Brute force protection configuration
+     */
+    fun getBruteForceConfig(config: JsonObject): com.enterprise.framework.model.BruteForceConfig {
+        val authConfig = config.getJsonObject("auth") ?: JsonObject()
+        val bruteForceConfig = authConfig.getJsonObject("bruteForce") ?: JsonObject()
+
+        return com.enterprise.framework.model.BruteForceConfig(
+            enabled = bruteForceConfig.getBoolean("enabled", true),
+            maxFailedAttempts = bruteForceConfig.getInteger("maxFailedAttempts", 5),
+            lockoutDurationSeconds = bruteForceConfig.getLong("lockoutDurationSeconds", 900L),
+            resetAfterSuccessfulLogin = bruteForceConfig.getBoolean("resetAfterSuccessfulLogin", true)
+        )
+    }
 }
