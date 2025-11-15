@@ -59,7 +59,7 @@ dependencies {
     implementation("org.bouncycastle:bcpkix-jdk18on:1.77")
 
     // Rate Limiting
-    implementation("com.github.vladimir-bukhtoyarov:bucket4j-core:8.7.0")
+    implementation("com.bucket4j:bucket4j-core:8.10.1")
 
     // Testing
     testImplementation("io.vertx:vertx-junit5:4.5.0")
