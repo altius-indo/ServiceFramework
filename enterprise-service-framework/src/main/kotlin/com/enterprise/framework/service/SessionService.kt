@@ -78,7 +78,7 @@ class SessionService(
                     }
 
                     // Store session in Redis
-                    storeSession(session)
+                    storeSession(session).map { session }
                 }
                 .onSuccess {
                     logger.info { "Session created for user: $userId (sessionId: $sessionId)" }

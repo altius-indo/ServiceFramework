@@ -172,16 +172,19 @@ class AuditLogService {
      */
     fun logMfaVerification(userId: String, username: String, success: Boolean) {
         val message = if (success) "MFA verification successful" else "MFA verification failed"
-        val logFunc = if (success) logger::info else logger::warn
 
-        logFunc {
-            buildAuditLog(
-                eventType = "MFA_VERIFICATION",
-                userId = userId,
-                username = username,
-                message = message,
-                additionalData = mapOf("success" to success.toString())
-            )
+        val auditLog = buildAuditLog(
+            eventType = "MFA_VERIFICATION",
+            userId = userId,
+            username = username,
+            message = message,
+            additionalData = mapOf("success" to success.toString())
+        )
+
+        if (success) {
+            logger.info { auditLog }
+        } else {
+            logger.warn { auditLog }
         }
     }
 

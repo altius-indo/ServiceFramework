@@ -75,7 +75,7 @@ class JwtKeyProvider(private val vertx: Vertx) {
     private fun createRS256Auth(config: JwtConfig): JWTAuth {
         logger.info { "Creating JWT auth with RS256 algorithm" }
 
-        val (publicKey, privateKey) = if (config.publicKey != null && config.privateKey != null) {
+        val keyPair = if (config.publicKey != null && config.privateKey != null) {
             // Load keys from PEM format
             logger.info { "Loading RSA keys from configuration" }
             loadRSAKeysFromPEM(config.publicKey, config.privateKey)
@@ -84,6 +84,9 @@ class JwtKeyProvider(private val vertx: Vertx) {
             logger.warn { "No RSA keys configured, generating new key pair (not recommended for production)" }
             generateRSAKeyPair()
         }
+
+        val publicKey = keyPair.public
+        val privateKey = keyPair.private
 
         val jwtAuthOptions = JWTAuthOptions()
             .addPubSecKey(
@@ -109,7 +112,7 @@ class JwtKeyProvider(private val vertx: Vertx) {
     private fun createES256Auth(config: JwtConfig): JWTAuth {
         logger.info { "Creating JWT auth with ES256 algorithm" }
 
-        val (publicKey, privateKey) = if (config.publicKey != null && config.privateKey != null) {
+        val keyPair = if (config.publicKey != null && config.privateKey != null) {
             // Load keys from PEM format
             logger.info { "Loading EC keys from configuration" }
             loadECKeysFromPEM(config.publicKey, config.privateKey)
@@ -118,6 +121,9 @@ class JwtKeyProvider(private val vertx: Vertx) {
             logger.warn { "No EC keys configured, generating new key pair (not recommended for production)" }
             generateECKeyPair()
         }
+
+        val publicKey = keyPair.public
+        val privateKey = keyPair.private
 
         val jwtAuthOptions = JWTAuthOptions()
             .addPubSecKey(

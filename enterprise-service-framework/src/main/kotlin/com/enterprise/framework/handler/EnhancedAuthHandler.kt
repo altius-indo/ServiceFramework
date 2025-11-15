@@ -1,5 +1,6 @@
 package com.enterprise.framework.handler
 
+import com.enterprise.framework.model.Credential
 import com.enterprise.framework.model.TokenRefreshRequest
 import com.enterprise.framework.model.User
 import com.enterprise.framework.repository.UserRepository
@@ -59,7 +60,7 @@ class EnhancedAuthHandler(
             .compose { allowed ->
                 if (!allowed) {
                     auditLogService.logRateLimitExceeded(username, ipAddress, "/auth/login")
-                    return@compose io.vertx.core.Future.failedFuture<Unit>(
+                    return@compose io.vertx.core.Future.failedFuture<Pair<User, Credential>?>(
                         Exception("Rate limit exceeded")
                     )
                 }
@@ -401,8 +402,16 @@ class EnhancedAuthHandler(
                 val user = object : io.vertx.ext.auth.User {
                     override fun principal() = payload
                     override fun attributes() = JsonObject()
-                    override fun isAuthorized(authority: String) =
-                        io.vertx.core.Future.succeededFuture(false)
+                    override fun isAuthorized(
+                        authority: io.vertx.ext.auth.authorization.Authorization,
+                        handler: io.vertx.core.Handler<io.vertx.core.AsyncResult<Boolean>>
+                    ): io.vertx.ext.auth.User {
+                        handler.handle(io.vertx.core.Future.succeededFuture(false))
+                        return this
+                    }
+                    override fun setAuthProvider(provider: io.vertx.ext.auth.AuthProvider) {
+                        // No-op: not needed for this simple implementation
+                    }
                     override fun merge(other: io.vertx.ext.auth.User) = this
                 }
 
