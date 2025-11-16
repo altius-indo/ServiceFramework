@@ -63,6 +63,7 @@ dependencies {
 
     // Testing
     testImplementation("io.vertx:vertx-junit5:4.5.0")
+    testImplementation("io.vertx:vertx-web-client:4.5.0")
     testImplementation("io.kotest:kotest-runner-junit5:5.8.0")
     testImplementation("io.kotest:kotest-assertions-core:5.8.0")
     testImplementation("io.mockk:mockk:1.13.8")

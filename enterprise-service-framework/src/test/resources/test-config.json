@@ -1,0 +1,71 @@
+{
+  "server": {
+    "host": "localhost",
+    "port": 8888,
+    "ssl": false
+  },
+  "database": {
+    "dynamodb": {
+      "endpoint": "http://localhost:8000",
+      "region": "us-east-1",
+      "tableName": "test-enterprise-data"
+    }
+  },
+  "redis": {
+    "host": "localhost",
+    "port": 6379
+  },
+  "auth": {
+    "jwt": {
+      "secret": "test-secret-key-for-testing-only",
+      "issuer": "enterprise-framework-test",
+      "accessTokenExpirationSeconds": 300,
+      "refreshTokenExpirationSeconds": 3600,
+      "algorithm": "HS256"
+    },
+    "password": {
+      "minLength": 8,
+      "requireUppercase": true,
+      "requireLowercase": true,
+      "requireDigit": true,
+      "requireSpecialChar": true,
+      "preventReuse": 3
+    },
+    "session": {
+      "absoluteTimeoutSeconds": 3600,
+      "idleTimeoutSeconds": 600,
+      "maxConcurrentSessions": 3,
+      "renewOnActivity": true
+    },
+    "rateLimiting": {
+      "enabled": true,
+      "maxRequests": 100,
+      "windowSeconds": 60,
+      "blacklistDurationSeconds": 300
+    },
+    "bruteForce": {
+      "enabled": true,
+      "maxFailedAttempts": 5,
+      "lockoutDurationSeconds": 300,
+      "resetAfterSuccessfulLogin": true
+    },
+    "mfa": {
+      "enabled": false,
+      "issuer": "Enterprise Framework Test",
+      "totpWindowSize": 1,
+      "enforced": false
+    }
+  },
+  "circuit-breaker": {
+    "maxFailures": 5,
+    "timeout": 5000,
+    "resetTimeout": 10000
+  },
+  "health": {
+    "path": "/health",
+    "port": 8889
+  },
+  "metrics": {
+    "enabled": false
+  }
+}

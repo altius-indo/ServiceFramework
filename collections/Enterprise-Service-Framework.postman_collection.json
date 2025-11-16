@@ -1,0 +1,504 @@
+{
+	"info": {
+		"_postman_id": "enterprise-service-framework-v1",
+		"name": "Enterprise Service Framework",
+		"description": "API collection for the Enterprise Service Framework with authentication, session management, and protected API endpoints.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Checks",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"health"
+							]
+						},
+						"description": "Check overall health status of the service including database and Redis connectivity."
+					},
+					"response": []
+				},
+				{
+					"name": "Readiness Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/ready",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"ready"
+							]
+						},
+						"description": "Kubernetes readiness probe endpoint."
+					},
+					"response": []
+				},
+				{
+					"name": "Liveness Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/live",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"live"
+							]
+						},
+						"description": "Kubernetes liveness probe endpoint."
+					},
+					"response": []
+				}
+			],
+			"description": "Health check endpoints for monitoring service status."
+		},
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.environment.set(\"access_token\", jsonData.accessToken);",
+									"    pm.environment.set(\"refresh_token\", jsonData.refreshToken);",
+									"    pm.environment.set(\"session_id\", jsonData.sessionId);",
+									"    console.log(\"Tokens and session ID saved to environment\");",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"testuser\",\n  \"password\": \"TestPassword123!\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/login",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"login"
+							]
+						},
+						"description": "Authenticate user and receive access token, refresh token, and session ID."
+					},
+					"response": []
+				},
+				{
+					"name": "Refresh Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.environment.set(\"access_token\", jsonData.accessToken);",
+									"    console.log(\"New access token saved to environment\");",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refreshToken\": \"{{refresh_token}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/refresh",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"refresh"
+							]
+						},
+						"description": "Refresh the access token using a valid refresh token."
+					},
+					"response": []
+				},
+				{
+					"name": "Token Introspection",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"{{access_token}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/introspect",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"introspect"
+							]
+						},
+						"description": "Introspect a token to check its validity and get token metadata."
+					},
+					"response": []
+				},
+				{
+					"name": "Logout",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": ""
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/logout",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"logout"
+							]
+						},
+						"description": "Logout user and invalidate current session. Requires authentication."
+					},
+					"response": []
+				}
+			],
+			"description": "Authentication endpoints for login, logout, and token management."
+		},
+		{
+			"name": "Session Management",
+			"item": [
+				{
+					"name": "List Active Sessions",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/auth/sessions",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"sessions"
+							]
+						},
+						"description": "Get a list of all active sessions for the authenticated user."
+					},
+					"response": []
+				},
+				{
+					"name": "Terminate Session",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/auth/sessions/:sessionId",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"sessions",
+								":sessionId"
+							],
+							"variable": [
+								{
+									"key": "sessionId",
+									"value": "{{session_id}}",
+									"description": "Session ID to terminate"
+								}
+							]
+						},
+						"description": "Terminate a specific session by session ID."
+					},
+					"response": []
+				}
+			],
+			"description": "Session management endpoints for listing and terminating user sessions."
+		},
+		{
+			"name": "API v1",
+			"item": [
+				{
+					"name": "List Resources",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								""
+							]
+						},
+						"description": "List all resources. Requires authentication."
+					},
+					"response": []
+				},
+				{
+					"name": "Create Resource",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Example Resource\",\n  \"description\": \"This is an example resource\",\n  \"data\": {\n    \"key1\": \"value1\",\n    \"key2\": \"value2\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								""
+							]
+						},
+						"description": "Create a new resource. Requires authentication."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Resource",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/:id",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								":id"
+							],
+							"variable": [
+								{
+									"key": "id",
+									"value": "123e4567-e89b-12d3-a456-426614174000",
+									"description": "Resource ID"
+								}
+							]
+						},
+						"description": "Get a specific resource by ID. Requires authentication."
+					},
+					"response": []
+				},
+				{
+					"name": "Update Resource",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Updated Resource\",\n  \"description\": \"This resource has been updated\",\n  \"data\": {\n    \"key1\": \"updated_value1\",\n    \"key2\": \"updated_value2\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/:id",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								":id"
+							],
+							"variable": [
+								{
+									"key": "id",
+									"value": "123e4567-e89b-12d3-a456-426614174000",
+									"description": "Resource ID"
+								}
+							]
+						},
+						"description": "Update an existing resource by ID. Requires authentication."
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Resource",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{access_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/:id",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								":id"
+							],
+							"variable": [
+								{
+									"key": "id",
+									"value": "123e4567-e89b-12d3-a456-426614174000",
+									"description": "Resource ID"
+								}
+							]
+						},
+						"description": "Delete a resource by ID. Requires authentication."
+					},
+					"response": []
+				}
+			],
+			"description": "Protected API endpoints (v1) for CRUD operations on resources."
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080",
+			"type": "string"
+		}
+	]
+}
