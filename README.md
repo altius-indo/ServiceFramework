@@ -9,7 +9,7 @@ This repository contains a robust framework for building high-performance, enter
 **Key Features:**
 
 *   **Authentication**: Multi-provider support (JWT, OAuth2, SAML)
-*   **Authorization**: RBAC, ABAC, ReBAC
+*   **Authorization**: Comprehensive RBAC, ABAC, and ReBAC implementation with policy engine, permission management, multi-tenancy, and dynamic authorization
 *   **Rate Limiting**: Multiple strategies (Token Bucket, Leaky Bucket, etc.)
 *   **Distributed Tracing**: OpenTelemetry integration
 *   **Monitoring**: Metrics, health checks, and alerts
@@ -103,8 +103,13 @@ Once running, the following endpoints are available:
 - `DELETE /auth/sessions/:sessionId` - Terminate session (protected)
 - `POST /auth/introspect` - Token introspection
 
+**Authorization:**
+- All API endpoints support authorization via `AuthorizationHandler`
+- Event bus: `authz.authorize` - Programmatic authorization requests
+- Event bus: `authz.audit` - Authorization audit logging
+
 **API:**
-- `/api/v1/*` - Protected API endpoints
+- `/api/v1/*` - Protected API endpoints with authorization
 
 ### Stopping the Services
 
@@ -208,13 +213,205 @@ The application's configuration is loaded from `enterprise-service-framework/src
 *   Server settings
 *   Database connections (DynamoDB, Redis)
 *   Authentication (JWT secrets)
+*   Authorization (policy engine, caching)
 *   Logging levels
+
+### Authorization Configuration
+
+Add authorization settings to `application.json`:
+
+```json
+{
+  "authorization": {
+    "cache": {
+      "enabled": true,
+      "ttl": 60
+    }
+  },
+  "redis": {
+    "host": "localhost",
+    "port": 6379,
+    "password": null
+  }
+}
+```
+
+## Authorization System
+
+The framework includes a comprehensive authorization system implementing RBAC, ABAC, and ReBAC models.
+
+### Features
+
+**Access Control Models:**
+- **RBAC**: Hierarchical roles with inheritance, role assignment at user/group levels
+- **ABAC**: Policy-based decisions using user, resource, and environmental attributes
+- **ReBAC**: Graph-based access control with ownership, delegation, and transitive relationships
+
+**Permission Management:**
+- Resource-level, field-level, and operation-level permissions
+- Time-based permissions with expiration
+- Conditional permissions based on runtime context
+- Permission inheritance and delegation with audit trails
+
+**Policy Engine:**
+- Declarative policy definitions with version control
+- Centralized Policy Decision Point (PDP) and distributed Policy Enforcement Points (PEPs)
+- Policy evaluation caching with configurable TTL
+- Real-time policy updates without service restart
+- Performance: <10ms policy evaluation at p95
+
+**Resource Authorization:**
+- Resource ownership management with transfer capabilities
+- Resource sharing (public, private, shared) with link-based sharing
+- Hierarchical resource permissions with inheritance
+- Bulk permission management
+
+**Multi-Tenancy:**
+- Complete data isolation between tenants
+- Separate encryption keys per tenant
+- Resource quotas and limits per tenant
+- Tenant-specific configuration and policies
+- Cross-tenant collaboration with explicit opt-in
+
+**Dynamic Authorization:**
+- Context-aware authorization (time, location, device, network-based)
+- Just-in-time (JIT) access with approval workflows
+- Usage-based authorization limits and quotas
+- Risk-based adaptive authorization
+
+**Authorization Audit:**
+- Comprehensive access logging (allow/deny decisions)
+- Structured logs with full context for analysis
+- Real-time streaming to SIEM systems
+- Compliance reporting (SOX, HIPAA, GDPR, PCI-DSS)
+- Forensics support with immutable audit trails
+
+### Usage
+
+**Deploying Authorization:**
+
+```kotlin
+val vertx = Vertx.vertx()
+val deploymentOptions = DeploymentOptions().setConfig(config)
+vertx.deployVerticle(AuthorizationVerticle::class.java.name, deploymentOptions)
+```
+
+**Protecting Routes:**
+
+```kotlin
+import com.enterprise.framework.authz.handlers.AuthorizationHandler
+import com.enterprise.framework.authz.utils.AuthorizationUtils
+
+val router = Router.router(vertx)
+
+// Get services from verticle
+val authzService = AuthorizationUtils.getAuthorizationService(vertx)
+val auditService = AuthorizationUtils.getAuditService(vertx)
+val dynamicAuthzService = AuthorizationUtils.getDynamicAuthzService(vertx)
+
+// Protect a route
+router.get("/api/documents/:id")
+    .handler(AuthorizationHandler(
+        authzService!!,
+        auditService!!,
+        dynamicAuthzService!!,
+        "read",
+        "document"
+    ))
+    .handler { context ->
+        // Your handler logic - authorization already checked
+    }
+```
+
+**Programmatic Authorization:**
+
+```kotlin
+import com.enterprise.framework.authz.models.AuthorizationContext
+import com.enterprise.framework.authz.models.SubjectType
+
+val context = AuthorizationContext(
+    subjectId = "user123",
+    subjectType = SubjectType.USER,
+    resourceId = "doc456",
+    resourceType = "document",
+    action = "read",
+    tenantId = "tenant1",
+    userAttributes = mapOf("department" to "Engineering"),
+    environmentalAttributes = mapOf("ipAddress" to "192.168.1.1")
+)
+
+val decision = authorizationService.authorize(context)
+if (decision.allowed) {
+    // Proceed with operation
+} else {
+    // Handle denial
+    logger.warn { "Access denied: ${decision.reason}" }
+}
+```
+
+**Creating Policies:**
+
+```kotlin
+import com.enterprise.framework.authz.models.*
+import java.util.UUID
+
+val policy = Policy(
+    id = UUID.randomUUID().toString(),
+    name = "Allow Engineering Department Access",
+    effect = PolicyEffect.ALLOW,
+    actions = listOf("read", "write"),
+    resources = listOf("document:*"),
+    conditions = mapOf(
+        "department" to PolicyCondition(
+            attribute = "user.department",
+            operator = ConditionOperator.EQUALS,
+            value = "Engineering"
+        )
+    ),
+    priority = 100,
+    tenantId = "tenant1"
+)
+
+policyService.createPolicy(policy)
+```
+
+**Creating Roles:**
+
+```kotlin
+import com.enterprise.framework.authz.models.Role
+import java.util.UUID
+
+val role = Role(
+    id = UUID.randomUUID().toString(),
+    name = "Document Editor",
+    permissions = listOf("document:read", "document:write"),
+    parentRoleId = "viewer-role-id", // Inherit from viewer role
+    tenantId = "tenant1"
+)
+
+roleRepository.save(role)
+
+// Assign role to user
+val assignment = RoleAssignment(
+    id = UUID.randomUUID().toString(),
+    roleId = role.id,
+    subjectId = "user123",
+    subjectType = SubjectType.USER,
+    assignedBy = "admin",
+    tenantId = "tenant1"
+)
+
+roleRepository.assignRole(assignment)
+```
+
+For detailed authorization documentation, see `enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`.
 
 ## Documentation
 
 *   **Specifications**: See the `specs/` directory for detailed requirements and design documents
 *   **Index**: `specs/INDEX.md` - Complete documentation index
 *   **Quick Reference**: `specs/QUICK-REFERENCE.md` - Fast access to key information
+*   **Authorization**: `enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md` - Authorization system documentation
 
 ## Troubleshooting
 
