@@ -8,13 +8,13 @@ This repository contains a robust framework for building high-performance, enter
 
 **Key Features:**
 
-*   **Authentication**: Multi-provider support (JWT, OAuth2, SAML)
-*   **Authorization**: Comprehensive RBAC, ABAC, and ReBAC implementation with policy engine, permission management, multi-tenancy, and dynamic authorization
-*   **Rate Limiting**: Multiple strategies (Token Bucket, Leaky Bucket, etc.)
-*   **Distributed Tracing**: OpenTelemetry integration
-*   **Monitoring**: Metrics, health checks, and alerts
-*   **Event-Driven**: Pub/sub with Kafka
-*   **High Availability**: Circuit breakers, bulkheads, and cellularization
+- **Authentication**: Multi-provider support (JWT, OAuth2, SAML)
+- **Authorization**: Comprehensive RBAC, ABAC, and ReBAC implementation with policy engine, permission management, multi-tenancy, and dynamic authorization
+- **Rate Limiting**: Multiple strategies (Token Bucket, Leaky Bucket, etc.)
+- **Distributed Tracing**: OpenTelemetry integration
+- **Monitoring**: Metrics, health checks, and alerts
+- **Event-Driven**: Pub/sub with Kafka
+- **High Availability**: Circuit breakers, bulkheads, and cellularization
 
 ## Documentation-First Philosophy
 
@@ -36,9 +36,9 @@ The generated documents will be placed in the `specs` directory. For a detailed 
 
 ### Prerequisites
 
-*   **JDK 17+** - For running the Kotlin/Java application
-*   **Gradle 8.4+** - Build automation (wrapper included)
-*   **Docker & Docker Compose** - For running dependencies (Redis, DynamoDB)
+- **JDK 17+** - For running the Kotlin/Java application
+- **Gradle 8.4+** - Build automation (wrapper included)
+- **Docker & Docker Compose** - For running dependencies (Redis, DynamoDB)
 
 ### Setup and Run
 
@@ -52,10 +52,12 @@ docker-compose -f docker/docker-compose.yml up -d
 ```
 
 This will start:
+
 - **Redis** on port `6379` (session/cache storage)
 - **DynamoDB Local** on port `8000` (database)
 
 Verify services are running:
+
 ```bash
 docker ps
 ```
@@ -72,17 +74,19 @@ The application will start on `http://localhost:8080`
 #### 3. Verify the Service
 
 Test the health endpoint:
+
 ```bash
 curl http://localhost:8080/health
 ```
 
 Expected response:
+
 ```json
 {
   "status": "UP",
   "checks": [
-    {"id": "database", "status": "UP"},
-    {"id": "redis", "status": "UP"}
+    { "id": "database", "status": "UP" },
+    { "id": "redis", "status": "UP" }
   ],
   "outcome": "UP"
 }
@@ -93,11 +97,13 @@ Expected response:
 Once running, the following endpoints are available:
 
 **Health Checks:**
+
 - `GET /health` - Overall health status
 - `GET /ready` - Readiness probe
 - `GET /live` - Liveness probe
 
 **Authentication:**
+
 - `POST /auth/login` - User login
 - `POST /auth/refresh` - Refresh access token
 - `POST /auth/logout` - Logout (protected)
@@ -106,19 +112,23 @@ Once running, the following endpoints are available:
 - `POST /auth/introspect` - Token introspection
 
 **Authorization:**
+
 - All API endpoints support authorization via `AuthorizationHandler`
 - Event bus: `authz.authorize` - Programmatic authorization requests
 - Event bus: `authz.audit` - Authorization audit logging
 
 **API:**
+
 - `/api/v1/*` - Protected API endpoints with authorization
 
 **CLI:**
+
 - Use the CLI tool for control plane management - See [CLI Documentation](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md)
 
 ### Stopping the Services
 
 **Using Scripts (Recommended):**
+
 ```bash
 cd enterprise-service-framework
 ./scripts/stop.sh              # Stop application only
@@ -188,11 +198,11 @@ kubectl apply -f k8s/
 
 ### Key Documentation Files
 
-*   **Main README**: This file - Project overview and quick start
-*   **Authorization**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md) - Authorization system details
-*   **CLI**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md) - CLI tool documentation
-*   **Scripts**: [`enterprise-service-framework/scripts/README.md`](enterprise-service-framework/scripts/README.md) - Service management scripts
-*   **Specifications**: [`specs/README.md`](specs/README.md) - Technical specifications overview
+- **Main README**: This file - Project overview and quick start
+- **Authorization**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md) - Authorization system details
+- **CLI**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md) - CLI tool documentation
+- **Scripts**: [`enterprise-service-framework/scripts/README.md`](enterprise-service-framework/scripts/README.md) - Service management scripts
+- **Specifications**: [`specs/README.md`](specs/README.md) - Technical specifications overview
 
 ## Development
 
@@ -206,6 +216,7 @@ cd enterprise-service-framework
 ```
 
 The build creates:
+
 - Standard JAR: `build/libs/enterprise-service-framework-1.0.0-SNAPSHOT.jar`
 - Fat JAR (with dependencies): `build/libs/enterprise-service-framework-1.0.0-SNAPSHOT-all.jar`
 
@@ -237,6 +248,7 @@ cd enterprise-service-framework
 ```
 
 Common tasks:
+
 - `./gradlew clean` - Clean build artifacts
 - `./gradlew build` - Build the project
 - `./gradlew test` - Run tests
@@ -249,11 +261,11 @@ The application's configuration is loaded from `enterprise-service-framework/src
 
 **Key configuration sections:**
 
-*   Server settings
-*   Database connections (DynamoDB, Redis)
-*   Authentication (JWT secrets)
-*   Authorization (policy engine, caching)
-*   Logging levels
+- Server settings
+- Database connections (DynamoDB, Redis)
+- Authentication (JWT secrets)
+- Authorization (policy engine, caching)
+- Logging levels
 
 ### Authorization Configuration
 
@@ -284,17 +296,20 @@ The framework includes a comprehensive authorization system implementing RBAC, A
 ### Features
 
 **Access Control Models:**
+
 - **RBAC**: Hierarchical roles with inheritance, role assignment at user/group levels
 - **ABAC**: Policy-based decisions using user, resource, and environmental attributes
 - **ReBAC**: Graph-based access control with ownership, delegation, and transitive relationships
 
 **Permission Management:**
+
 - Resource-level, field-level, and operation-level permissions
 - Time-based permissions with expiration
 - Conditional permissions based on runtime context
 - Permission inheritance and delegation with audit trails
 
 **Policy Engine:**
+
 - Declarative policy definitions with version control
 - Centralized Policy Decision Point (PDP) and distributed Policy Enforcement Points (PEPs)
 - Policy evaluation caching with configurable TTL
@@ -302,12 +317,14 @@ The framework includes a comprehensive authorization system implementing RBAC, A
 - Performance: <10ms policy evaluation at p95
 
 **Resource Authorization:**
+
 - Resource ownership management with transfer capabilities
 - Resource sharing (public, private, shared) with link-based sharing
 - Hierarchical resource permissions with inheritance
 - Bulk permission management
 
 **Multi-Tenancy:**
+
 - Complete data isolation between tenants
 - Separate encryption keys per tenant
 - Resource quotas and limits per tenant
@@ -315,12 +332,14 @@ The framework includes a comprehensive authorization system implementing RBAC, A
 - Cross-tenant collaboration with explicit opt-in
 
 **Dynamic Authorization:**
+
 - Context-aware authorization (time, location, device, network-based)
 - Just-in-time (JIT) access with approval workflows
 - Usage-based authorization limits and quotas
 - Risk-based adaptive authorization
 
 **Authorization Audit:**
+
 - Comprehensive access logging (allow/deny decisions)
 - Structured logs with full context for analysis
 - Real-time streaming to SIEM systems
@@ -453,18 +472,42 @@ The framework includes a comprehensive CLI tool for control plane management.
 
 ### Quick Start with CLI
 
-**1. Bootstrap the System:**
+The CLI tool provides command-line access for system administration.
+
+**1. Start Docker Services:**
+
 ```bash
 cd enterprise-service-framework
+docker-compose -f docker/docker-compose.yml up -d
+```
+
+**2. Run Application Once (to initialize database tables):**
+
+```bash
+# Start the application - it will create required tables
+./gradlew run
+```
+
+Wait for the application to start (you'll see "HTTP server started"), then stop it with `Ctrl+C`.
+
+**3. Bootstrap the System:**
+
+Create the initial admin user and roles:
+
+```bash
 ./scripts/esf-cli.sh bootstrap --username admin --email admin@example.com --password
 ```
 
-**2. Authenticate:**
+Enter a secure password when prompted.
+
+**4. Authenticate:**
+
 ```bash
 ./scripts/esf-cli.sh auth login --username admin --password
 ```
 
-**3. Manage Resources:**
+**5. Manage Resources:**
+
 ```bash
 # Create a role
 ./scripts/esf-cli.sh authz role create --name Editor --permissions "document:read,document:write"
@@ -484,27 +527,29 @@ For complete CLI documentation, see the [CLI README](enterprise-service-framewor
 
 This project includes comprehensive documentation at multiple levels:
 
-*   **Authorization System**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md)
-    - Complete guide to RBAC, ABAC, and ReBAC implementation
-    - Usage examples and API documentation
-    - Configuration and integration instructions
+- **Authorization System**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md)
 
-*   **CLI Tool**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md)
-    - Control plane management CLI documentation
-    - Bootstrap authentication and authorization guide
-    - Command reference and usage examples
+  - Complete guide to RBAC, ABAC, and ReBAC implementation
+  - Usage examples and API documentation
+  - Configuration and integration instructions
 
-*   **Service Management Scripts**: [`enterprise-service-framework/scripts/README.md`](enterprise-service-framework/scripts/README.md)
-    - Startup, shutdown, and status scripts documentation
-    - Troubleshooting guide
-    - Service management best practices
+- **CLI Tool**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md)
+
+  - Control plane management CLI documentation
+  - Bootstrap authentication and authorization guide
+  - Command reference and usage examples
+
+- **Service Management Scripts**: [`enterprise-service-framework/scripts/README.md`](enterprise-service-framework/scripts/README.md)
+  - Startup, shutdown, and status scripts documentation
+  - Troubleshooting guide
+  - Service management best practices
 
 ### Specification Documents
 
-*   **Specifications**: See the `specs/` directory for detailed requirements and design documents
-*   **Specs Index**: [`specs/README.md`](specs/README.md) - Overview of all specification documents
-*   **Complete Index**: [`specs/INDEX.md`](specs/INDEX.md) - Complete documentation index with reading order
-*   **Quick Reference**: [`specs/QUICK-REFERENCE.md`](specs/QUICK-REFERENCE.md) - Fast access to key information
+- **Specifications**: See the `specs/` directory for detailed requirements and design documents
+- **Specs Index**: [`specs/README.md`](specs/README.md) - Overview of all specification documents
+- **Complete Index**: [`specs/INDEX.md`](specs/INDEX.md) - Complete documentation index with reading order
+- **Quick Reference**: [`specs/QUICK-REFERENCE.md`](specs/QUICK-REFERENCE.md) - Fast access to key information
 
 ## Troubleshooting
 
@@ -549,6 +594,7 @@ docker ps | grep enterprise
 ```
 
 You should see:
+
 - `enterprise-redis`
 - `enterprise-dynamodb`
 
