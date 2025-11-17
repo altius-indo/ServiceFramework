@@ -22,6 +22,7 @@ dependencies {
     // Vert.x
     implementation("io.vertx:vertx-core:4.5.0")
     implementation("io.vertx:vertx-web:4.5.0")
+    implementation("io.vertx:vertx-web-client:4.5.0")
     implementation("io.vertx:vertx-lang-kotlin:4.5.0")
     implementation("io.vertx:vertx-lang-kotlin-coroutines:4.5.0")
     implementation("io.vertx:vertx-config:4.5.0")
@@ -60,6 +61,11 @@ dependencies {
 
     // Rate Limiting
     implementation("com.bucket4j:bucket4j-core:8.10.1")
+    
+    // CLI
+    implementation("info.picocli:picocli:4.7.5")
+    implementation("info.picocli:picocli-codegen:4.7.5")
+    annotationProcessor("info.picocli:picocli-codegen:4.7.5")
 
     // Testing
     testImplementation("io.vertx:vertx-junit5:4.5.0")
@@ -82,4 +88,13 @@ tasks.withType<Test> {
 
 application {
     mainClass.set("com.enterprise.framework.MainKt")
+}
+
+// CLI application configuration
+tasks.register<JavaExec>("cli") {
+    group = "application"
+    description = "Run the CLI tool"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.enterprise.framework.cli.CLIMainKt")
+    args = project.findProperty("cliArgs")?.toString()?.split(" ") ?: emptyList()
 }
