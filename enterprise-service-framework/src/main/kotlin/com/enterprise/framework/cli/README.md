@@ -31,7 +31,7 @@ First, bootstrap the system to create the initial admin user:
 java -jar build/libs/enterprise-service-framework-1.0.0-SNAPSHOT-all.jar bootstrap \
   --username admin \
   --email admin@example.com \
-  --password
+  --password adminuser123!
 ```
 
 Or use the wrapper script:

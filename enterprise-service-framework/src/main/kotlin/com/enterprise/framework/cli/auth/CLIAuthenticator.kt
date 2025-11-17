@@ -6,7 +6,7 @@ import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.client.WebClient
 import io.vertx.ext.web.client.WebClientOptions
-import io.vertx.kotlin.coroutines.await
+import io.vertx.kotlin.coroutines.coAwait
 import mu.KotlinLogging
 import java.io.File
 import java.time.Instant
@@ -51,7 +51,7 @@ class CLIAuthenticator(
                     .put("username", username)
                     .put("password", password)
                 )
-                .await()
+                .coAwait()
 
             if (response.statusCode() == 200) {
                 val body = response.bodyAsJsonObject()
@@ -110,7 +110,7 @@ class CLIAuthenticator(
             val response = webClient.post("/auth/refresh")
                 .putHeader("Content-Type", "application/json")
                 .sendJson(JsonObject().put("refreshToken", refreshToken))
-                .await()
+                .coAwait()
 
             if (response.statusCode() == 200) {
                 val body = response.bodyAsJsonObject()
@@ -146,7 +146,7 @@ class CLIAuthenticator(
                 webClient.post("/auth/logout")
                     .putHeader("Authorization", "Bearer ${tokenData.accessToken}")
                     .send()
-                    .await()
+                    .coAwait()
             } catch (e: Exception) {
                 logger.warn(e) { "Error during logout" }
             }

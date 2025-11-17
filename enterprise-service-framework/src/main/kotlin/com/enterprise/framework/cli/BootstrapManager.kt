@@ -6,7 +6,7 @@ import com.enterprise.framework.model.User
 import com.enterprise.framework.repository.UserRepository
 import com.enterprise.framework.service.PasswordHashingService
 import io.vertx.core.Vertx
-import io.vertx.kotlin.coroutines.await
+import io.vertx.kotlin.coroutines.coAwait
 import mu.KotlinLogging
 import java.time.Instant
 import java.util.UUID
@@ -138,7 +138,7 @@ class BootstrapManager(
         )
         
         // Save user and credentials
-        userRepository.createUser(user, credential).await()
+        userRepository.createUser(user, credential).coAwait()
         
         return user
     }
