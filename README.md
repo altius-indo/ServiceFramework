@@ -481,14 +481,26 @@ cd enterprise-service-framework
 docker-compose -f docker/docker-compose.yml up -d
 ```
 
-**2. Run Application Once (to initialize database tables):**
+**2. Initialize Database Tables:**
+
+**Option A: Run Application Once (Recommended)**
 
 ```bash
-# Start the application - it will create required tables
+# Start the application - it will automatically create required tables
 ./gradlew run
 ```
 
 Wait for the application to start (you'll see "HTTP server started"), then stop it with `Ctrl+C`.
+
+**Option B: Use Python Script (Alternative)**
+
+If you have Python 3 and boto3 installed:
+
+```bash
+python3 scripts/init-dynamodb.py
+```
+
+Note: The init-dynamodb.sh script is also available but requires properly configured AWS CLI.
 
 **3. Bootstrap the System:**
 
