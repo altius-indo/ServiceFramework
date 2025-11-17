@@ -32,6 +32,8 @@ The generated documents will be placed in the `specs` directory. For a detailed 
 
 ## Quick Start
 
+> **Note**: For detailed setup instructions, see the [Service Management Scripts README](enterprise-service-framework/scripts/README.md).
+
 ### Prerequisites
 
 *   **JDK 17+** - For running the Kotlin/Java application
@@ -111,14 +113,27 @@ Once running, the following endpoints are available:
 **API:**
 - `/api/v1/*` - Protected API endpoints with authorization
 
+**CLI:**
+- Use the CLI tool for control plane management - See [CLI Documentation](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md)
+
 ### Stopping the Services
 
+**Using Scripts (Recommended):**
+```bash
+cd enterprise-service-framework
+./scripts/stop.sh              # Stop application only
+./scripts/stop.sh --stop-deps  # Stop application and Docker services
+```
+
+**Manual Stop:**
 Stop the application with `Ctrl+C`, then stop Docker services:
 
 ```bash
 cd enterprise-service-framework
 docker-compose -f docker/docker-compose.yml down
 ```
+
+For more details, see the [Scripts README](enterprise-service-framework/scripts/README.md).
 
 ### Docker Compose Only
 
@@ -145,15 +160,39 @@ kubectl apply -f k8s/
 .
 ├── enterprise-service-framework/ # The main application source code
 │   ├── src/main/kotlin/          # Application source code
-│   ├── src/main/resources/       # Configuration files
+│   │   ├── com/enterprise/framework/
+│   │   │   ├── authz/           # Authorization system
+│   │   │   │   └── README.md     # Authorization documentation
+│   │   │   ├── cli/              # CLI tool
+│   │   │   └── README.md         # CLI documentation
+│   │   │   ├── auth/             # Authentication
+│   │   │   ├── api/              # API handlers
+│   │   │   └── ...
+│   │   └── resources/            # Configuration files
 │   ├── src/test/kotlin/          # Test files
 │   ├── docker/                   # Docker configurations
 │   ├── k8s/                      # Kubernetes manifests
 │   └── scripts/                  # Utility scripts
+│       ├── README.md             # Scripts documentation
+│       ├── start.sh              # Startup script
+│       ├── stop.sh               # Shutdown script
+│       ├── status.sh             # Status script
+│       └── esf-cli.sh            # CLI wrapper script
 ├── specs/                        # Technical specification documents
+│   ├── README.md                 # Specs overview
+│   ├── INDEX.md                  # Complete documentation index
+│   └── ...
 ├── generate_specs.py             # Script for generating specifications
 └── project_setup.sh              # Script for initial project setup
 ```
+
+### Key Documentation Files
+
+*   **Main README**: This file - Project overview and quick start
+*   **Authorization**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md) - Authorization system details
+*   **CLI**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md) - CLI tool documentation
+*   **Scripts**: [`enterprise-service-framework/scripts/README.md`](enterprise-service-framework/scripts/README.md) - Service management scripts
+*   **Specifications**: [`specs/README.md`](specs/README.md) - Technical specifications overview
 
 ## Development
 
@@ -237,6 +276,8 @@ Add authorization settings to `application.json`:
 ```
 
 ## Authorization System
+
+> **Full Documentation**: See the [Authorization System README](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md) for complete details.
 
 The framework includes a comprehensive authorization system implementing RBAC, ABAC, and ReBAC models.
 
@@ -404,14 +445,66 @@ val assignment = RoleAssignment(
 roleRepository.assignRole(assignment)
 ```
 
-For detailed authorization documentation, see `enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`.
+## CLI Tool
+
+> **Full Documentation**: See the [CLI README](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md) for complete CLI documentation.
+
+The framework includes a comprehensive CLI tool for control plane management.
+
+### Quick Start with CLI
+
+**1. Bootstrap the System:**
+```bash
+cd enterprise-service-framework
+./scripts/esf-cli.sh bootstrap --username admin --email admin@example.com --password
+```
+
+**2. Authenticate:**
+```bash
+./scripts/esf-cli.sh auth login --username admin --password
+```
+
+**3. Manage Resources:**
+```bash
+# Create a role
+./scripts/esf-cli.sh authz role create --name Editor --permissions "document:read,document:write"
+
+# Create a policy
+./scripts/esf-cli.sh policy create --name "Allow Engineering" --effect ALLOW --actions "read,write" --resources "document:*"
+
+# Check authorization
+./scripts/esf-cli.sh authz check --user user123 --resource doc456 --action read
+```
+
+For complete CLI documentation, see the [CLI README](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md).
 
 ## Documentation
 
+### Component Documentation
+
+This project includes comprehensive documentation at multiple levels:
+
+*   **Authorization System**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md)
+    - Complete guide to RBAC, ABAC, and ReBAC implementation
+    - Usage examples and API documentation
+    - Configuration and integration instructions
+
+*   **CLI Tool**: [`enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md`](enterprise-service-framework/src/main/kotlin/com/enterprise/framework/cli/README.md)
+    - Control plane management CLI documentation
+    - Bootstrap authentication and authorization guide
+    - Command reference and usage examples
+
+*   **Service Management Scripts**: [`enterprise-service-framework/scripts/README.md`](enterprise-service-framework/scripts/README.md)
+    - Startup, shutdown, and status scripts documentation
+    - Troubleshooting guide
+    - Service management best practices
+
+### Specification Documents
+
 *   **Specifications**: See the `specs/` directory for detailed requirements and design documents
-*   **Index**: `specs/INDEX.md` - Complete documentation index
-*   **Quick Reference**: `specs/QUICK-REFERENCE.md` - Fast access to key information
-*   **Authorization**: `enterprise-service-framework/src/main/kotlin/com/enterprise/framework/authz/README.md` - Authorization system documentation
+*   **Specs Index**: [`specs/README.md`](specs/README.md) - Overview of all specification documents
+*   **Complete Index**: [`specs/INDEX.md`](specs/INDEX.md) - Complete documentation index with reading order
+*   **Quick Reference**: [`specs/QUICK-REFERENCE.md`](specs/QUICK-REFERENCE.md) - Fast access to key information
 
 ## Troubleshooting
 
