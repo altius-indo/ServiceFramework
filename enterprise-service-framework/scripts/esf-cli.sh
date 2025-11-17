@@ -7,16 +7,14 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Find the CLI JAR
-CLI_JAR="$PROJECT_DIR/build/libs/enterprise-service-framework-1.0.0-SNAPSHOT-all.jar"
+# Change to project directory
+cd "$PROJECT_DIR"
 
-# If JAR doesn't exist, try to build it
-if [ ! -f "$CLI_JAR" ]; then
-    echo "CLI JAR not found. Building..."
-    cd "$PROJECT_DIR"
-    ./gradlew shadowJar
+# Use Gradle task to run CLI (recommended)
+if [ -f "./gradlew" ]; then
+    ./gradlew cli -PcliArgs="$*"
+else
+    echo "Error: Gradle wrapper not found"
+    exit 1
 fi
-
-# Run the CLI
-java -jar "$CLI_JAR" "$@"
 

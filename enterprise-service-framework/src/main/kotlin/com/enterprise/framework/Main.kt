@@ -19,9 +19,18 @@ private val logger = KotlinLogging.logger {}
  * and sets up a graceful shutdown hook. The application will continue running
  * until it is terminated.
  *
+ * If the first argument is "cli", it delegates to the CLI main class.
+ *
  * @param args Command-line arguments passed to the application.
  */
 fun main(args: Array<String>): Unit {
+    // Check if CLI mode is requested
+    if (args.isNotEmpty() && args[0] == "cli") {
+        // Delegate to CLI
+        com.enterprise.framework.cli.CLIMain.main(args.drop(1).toTypedArray())
+        return
+    }
+    
     runBlocking {
         logger.info { "Starting Enterprise Service Framework..." }
 

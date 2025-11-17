@@ -10,7 +10,9 @@ import io.vertx.core.Vertx
 import io.vertx.core.json.JsonObject
 import io.vertx.kotlin.coroutines.await
 import kotlinx.coroutines.runBlocking
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider
 import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import java.io.File
@@ -53,10 +55,22 @@ class CLIContext(
                 )
                 
                 // Create DynamoDB client
+                // For local DynamoDB, use static dummy credentials
+                val credentialsProvider = if (dbConfig.dynamoDbEndpoint.startsWith("http://localhost") || 
+                                               dbConfig.dynamoDbEndpoint.startsWith("http://127.0.0.1")) {
+                    // Local DynamoDB - use static dummy credentials
+                    StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("dummy", "dummy")
+                    )
+                } else {
+                    // AWS DynamoDB - use default credentials
+                    DefaultCredentialsProvider.create()
+                }
+                
                 val dynamoDbClient = DynamoDbAsyncClient.builder()
                     .region(Region.of(dbConfig.region))
                     .endpointOverride(URI.create(dbConfig.dynamoDbEndpoint))
-                    .credentialsProvider(DefaultCredentialsProvider.create())
+                    .credentialsProvider(credentialsProvider)
                     .build()
                 
                 val userRepository = UserRepository(vertx, dynamoDbClient, dbConfig.tableName)

@@ -55,16 +55,23 @@ class BootstrapCommand : Callable<Int> {
 
     override fun call(): Int {
         try {
+            // Check required fields first (before context initialization)
+            if (username.isNullOrBlank() || email.isNullOrBlank()) {
+                System.err.println("Error: Username and email are required")
+                return 1
+            }
+            
             val context = CLIContext.initialize(serverUrl)
             
-            if (password == null) {
+            // Handle password - if not provided or empty, prompt for it
+            if (password.isNullOrBlank()) {
                 print("Enter admin password: ")
                 password = System.console()?.readPassword()?.joinToString("") 
                     ?: readLine() ?: ""
             }
 
-            if (username.isNullOrBlank() || password.isNullOrBlank() || email.isNullOrBlank()) {
-                System.err.println("Error: Username, password, and email are required")
+            if (password.isNullOrBlank()) {
+                System.err.println("Error: Password is required")
                 return 1
             }
 

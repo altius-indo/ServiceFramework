@@ -95,6 +95,6 @@ tasks.register<JavaExec>("cli") {
     group = "application"
     description = "Run the CLI tool"
     classpath = sourceSets["main"].runtimeClasspath
-    mainClass.set("com.enterprise.framework.cli.CLIMainKt")
+    mainClass.set("com.enterprise.framework.cli.CLIMain")
     args = project.findProperty("cliArgs")?.toString()?.split(" ") ?: emptyList()
 }
