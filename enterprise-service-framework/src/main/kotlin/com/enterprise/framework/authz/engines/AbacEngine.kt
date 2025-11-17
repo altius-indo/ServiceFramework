@@ -184,7 +184,8 @@ class AbacEngine(
             }
             ConditionOperator.NOT_IN -> {
                 val list = condition.value as? List<*>
-                !(list?.contains(attributeValue) ?: false)
+                val contains = list?.contains(attributeValue) ?: false
+                !contains
             }
             ConditionOperator.GREATER_THAN -> compareValues(attributeValue, condition.value) > 0
             ConditionOperator.LESS_THAN -> compareValues(attributeValue, condition.value) < 0

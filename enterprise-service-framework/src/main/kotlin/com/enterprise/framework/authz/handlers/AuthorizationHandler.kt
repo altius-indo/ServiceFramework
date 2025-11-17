@@ -7,8 +7,8 @@ import com.enterprise.framework.authz.services.AuditService
 import com.enterprise.framework.authz.services.DynamicAuthorizationService
 import io.vertx.core.Handler
 import io.vertx.ext.web.RoutingContext
-import io.vertx.kotlin.coroutines.CoroutineScope
 import io.vertx.kotlin.coroutines.dispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import mu.KotlinLogging
 
@@ -24,10 +24,10 @@ class AuthorizationHandler(
     private val dynamicAuthzService: DynamicAuthorizationService,
     private val requiredAction: String,
     private val resourceType: String? = null
-) : Handler<RoutingContext>, CoroutineScope {
+) : Handler<RoutingContext> {
 
     override fun handle(context: RoutingContext) {
-        launch(context.vertx().dispatcher()) {
+        kotlinx.coroutines.CoroutineScope(context.vertx().dispatcher()).launch {
             try {
                 // Extract subject from request (typically from JWT token)
                 val subjectId = extractSubjectId(context)

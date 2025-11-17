@@ -29,7 +29,7 @@ class AuthorizationVerticle : BaseVerticle() {
 
     override suspend fun initialize() {
         // Load configuration
-        val config = config() ?: JsonObject()
+        val config = config ?: JsonObject()
         val authzConfig = config.getJsonObject("authorization") ?: JsonObject()
 
         // Initialize repositories
