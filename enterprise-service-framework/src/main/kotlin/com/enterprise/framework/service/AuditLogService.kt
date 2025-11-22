@@ -1,5 +1,7 @@
 package com.enterprise.framework.service
 
+import com.enterprise.framework.model.AuditLog
+import com.enterprise.framework.repository.AuditLogRepository
 import mu.KotlinLogging
 import java.time.Instant
 
@@ -10,8 +12,11 @@ private val logger = KotlinLogging.logger {}
  *
  * This service provides structured logging for security-relevant events
  * that can be ingested by SIEM systems for compliance and security monitoring.
+ * It also persists the logs to a repository.
  */
-class AuditLogService {
+class AuditLogService(
+    private val auditLogRepository: AuditLogRepository? = null
+) {
 
     /**
      * Logs a successful login event.
@@ -22,16 +27,28 @@ class AuditLogService {
      * @param userAgent User agent string
      */
     fun logLoginSuccess(userId: String, username: String, ipAddress: String?, userAgent: String?) {
+        val eventType = "LOGIN_SUCCESS"
+        val message = "User logged in successfully"
+
         logger.info {
-            buildAuditLog(
-                eventType = "LOGIN_SUCCESS",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
                 ipAddress = ipAddress,
                 userAgent = userAgent,
-                message = "User logged in successfully"
+                message = message
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            ipAddress = ipAddress,
+            userAgent = userAgent,
+            message = message
+        )
     }
 
     /**
@@ -43,16 +60,29 @@ class AuditLogService {
      * @param reason Reason for failure
      */
     fun logLoginFailure(username: String, ipAddress: String?, userAgent: String?, reason: String) {
+        val eventType = "LOGIN_FAILURE"
+        val message = "Login failed: $reason"
+        val additionalData = mapOf("reason" to reason)
+
         logger.warn {
-            buildAuditLog(
-                eventType = "LOGIN_FAILURE",
+            buildAuditLogString(
+                eventType = eventType,
                 username = username,
                 ipAddress = ipAddress,
                 userAgent = userAgent,
-                message = "Login failed: $reason",
-                additionalData = mapOf("reason" to reason)
+                message = message,
+                additionalData = additionalData
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            username = username,
+            ipAddress = ipAddress,
+            userAgent = userAgent,
+            message = message,
+            additionalData = additionalData
+        )
     }
 
     /**
@@ -63,15 +93,27 @@ class AuditLogService {
      * @param sessionId Session identifier
      */
     fun logLogout(userId: String, username: String, sessionId: String) {
+        val eventType = "LOGOUT"
+        val message = "User logged out"
+        val additionalData = mapOf("sessionId" to sessionId)
+
         logger.info {
-            buildAuditLog(
-                eventType = "LOGOUT",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
-                message = "User logged out",
-                additionalData = mapOf("sessionId" to sessionId)
+                message = message,
+                additionalData = additionalData
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message,
+            additionalData = additionalData
+        )
     }
 
     /**
@@ -81,14 +123,24 @@ class AuditLogService {
      * @param username Username
      */
     fun logTokenRefresh(userId: String, username: String) {
+        val eventType = "TOKEN_REFRESH"
+        val message = "Token refreshed"
+
         logger.info {
-            buildAuditLog(
-                eventType = "TOKEN_REFRESH",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
-                message = "Token refreshed"
+                message = message
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message
+        )
     }
 
     /**
@@ -99,15 +151,27 @@ class AuditLogService {
      * @param tokenId Token identifier that was revoked
      */
     fun logTokenRevocation(userId: String, username: String, tokenId: String) {
+        val eventType = "TOKEN_REVOCATION"
+        val message = "Token revoked"
+        val additionalData = mapOf("tokenId" to tokenId)
+
         logger.info {
-            buildAuditLog(
-                eventType = "TOKEN_REVOCATION",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
-                message = "Token revoked",
-                additionalData = mapOf("tokenId" to tokenId)
+                message = message,
+                additionalData = additionalData
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message,
+            additionalData = additionalData
+        )
     }
 
     /**
@@ -118,15 +182,27 @@ class AuditLogService {
      * @param reason Reason for lockout
      */
     fun logAccountLockout(userId: String, username: String, reason: String) {
+        val eventType = "ACCOUNT_LOCKOUT"
+        val message = "Account locked: $reason"
+        val additionalData = mapOf("reason" to reason)
+
         logger.warn {
-            buildAuditLog(
-                eventType = "ACCOUNT_LOCKOUT",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
-                message = "Account locked: $reason",
-                additionalData = mapOf("reason" to reason)
+                message = message,
+                additionalData = additionalData
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message,
+            additionalData = additionalData
+        )
     }
 
     /**
@@ -136,14 +212,24 @@ class AuditLogService {
      * @param username Username
      */
     fun logPasswordChange(userId: String, username: String) {
+        val eventType = "PASSWORD_CHANGE"
+        val message = "Password changed"
+
         logger.info {
-            buildAuditLog(
-                eventType = "PASSWORD_CHANGE",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
-                message = "Password changed"
+                message = message
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message
+        )
     }
 
     /**
@@ -153,14 +239,24 @@ class AuditLogService {
      * @param username Username
      */
     fun logMfaEnrollment(userId: String, username: String) {
+        val eventType = "MFA_ENROLLMENT"
+        val message = "MFA enrolled"
+
         logger.info {
-            buildAuditLog(
-                eventType = "MFA_ENROLLMENT",
+            buildAuditLogString(
+                eventType = eventType,
                 userId = userId,
                 username = username,
-                message = "MFA enrolled"
+                message = message
             )
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message
+        )
     }
 
     /**
@@ -171,21 +267,31 @@ class AuditLogService {
      * @param success Whether verification succeeded
      */
     fun logMfaVerification(userId: String, username: String, success: Boolean) {
+        val eventType = "MFA_VERIFICATION"
         val message = if (success) "MFA verification successful" else "MFA verification failed"
+        val additionalData = mapOf("success" to success.toString())
 
-        val auditLog = buildAuditLog(
-            eventType = "MFA_VERIFICATION",
+        val auditLogString = buildAuditLogString(
+            eventType = eventType,
             userId = userId,
             username = username,
             message = message,
-            additionalData = mapOf("success" to success.toString())
+            additionalData = additionalData
         )
 
         if (success) {
-            logger.info { auditLog }
+            logger.info { auditLogString }
         } else {
-            logger.warn { auditLog }
+            logger.warn { auditLogString }
         }
+
+        persistAuditLog(
+            eventType = eventType,
+            userId = userId,
+            username = username,
+            message = message,
+            additionalData = additionalData
+        )
     }
 
     /**
@@ -196,19 +302,66 @@ class AuditLogService {
      * @param endpoint Endpoint that was rate limited
      */
     fun logRateLimitExceeded(username: String?, ipAddress: String?, endpoint: String) {
+        val eventType = "RATE_LIMIT_EXCEEDED"
+        val message = "Rate limit exceeded for endpoint: $endpoint"
+        val additionalData = mapOf("endpoint" to endpoint)
+
         logger.warn {
-            buildAuditLog(
-                eventType = "RATE_LIMIT_EXCEEDED",
+            buildAuditLogString(
+                eventType = eventType,
                 username = username,
                 ipAddress = ipAddress,
-                message = "Rate limit exceeded for endpoint: $endpoint",
-                additionalData = mapOf("endpoint" to endpoint)
+                message = message,
+                additionalData = additionalData
             )
+        }
+
+        persistAuditLog(
+            eventType = eventType,
+            username = username,
+            ipAddress = ipAddress,
+            message = message,
+            additionalData = additionalData
+        )
+    }
+
+    private fun persistAuditLog(
+        eventType: String,
+        userId: String? = null,
+        username: String? = null,
+        ipAddress: String? = null,
+        userAgent: String? = null,
+        message: String,
+        additionalData: Map<String, String> = emptyMap()
+    ) {
+        try {
+            val logEntry = AuditLog(
+                timestamp = Instant.now(),
+                eventType = eventType,
+                userId = userId,
+                username = username,
+                ipAddress = ipAddress,
+                userAgent = userAgent,
+                message = message,
+                additionalData = additionalData
+            )
+
+            // Since save is synchronous in DynamoDbRepository and might be blocking,
+            // in a Vert.x app we should ideally run this on a worker thread.
+            // However, DynamoDbRepository uses the sync client.
+            // For now, we'll execute it directly but wrap in try-catch to not affect the flow.
+            // Ideally, AuditLogRepository should also offer an async save or we should wrap it.
+            // Given the current structure, we will just call it.
+
+            auditLogRepository?.save(logEntry)
+
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to persist audit log" }
         }
     }
 
     /**
-     * Builds a structured audit log message.
+     * Builds a structured audit log message string.
      *
      * @param eventType Type of event
      * @param userId User identifier (optional)
@@ -219,7 +372,7 @@ class AuditLogService {
      * @param additionalData Additional structured data
      * @return Structured audit log string
      */
-    private fun buildAuditLog(
+    private fun buildAuditLogString(
         eventType: String,
         userId: String? = null,
         username: String? = null,

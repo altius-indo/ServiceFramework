@@ -4,6 +4,7 @@ import com.enterprise.framework.config.ConfigLoader
 import com.enterprise.framework.handler.ApiHandler
 import com.enterprise.framework.handler.EnhancedAuthHandler
 import com.enterprise.framework.handler.HealthCheckHandler
+import com.enterprise.framework.repository.AuditLogRepository
 import com.enterprise.framework.repository.UserRepository
 import com.enterprise.framework.service.*
 import io.vertx.core.Future
@@ -108,10 +109,11 @@ class EnhancedHttpServerVerticle : BaseVerticle() {
         // Initialize core services
         passwordHashingService = PasswordHashingService()
         val passwordPolicyValidator = PasswordPolicyValidator(passwordPolicy)
-        val auditLogService = AuditLogService()
 
         // Initialize repository
         val userRepository = UserRepository(vertx, dynamoDbClient, databaseConfig.tableName)
+        val auditLogRepository = AuditLogRepository(databaseConfig)
+        val auditLogService = AuditLogService(auditLogRepository)
 
         // Initialize credential service
         val credentialService = CredentialService(
